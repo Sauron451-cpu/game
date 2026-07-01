@@ -42,8 +42,17 @@ TOWER_UPGRADE_COST = {
     "miner": 120, "barracks": 250
 }
 
-STARTING_MONEY = 400
-STARTING_ORE = 50
+STARTING_MONEY = 500
+STARTING_ORE = 70
+CASTLE_GOLD_INCOME = 8
+CASTLE_GOLD_INTERVAL = 300
+REVEAL_RADIUS_CELLS = 3
+BASE_SCOUT_COST = 20
+SCOUT_COST_STEP = 8
+TOWER_ORE_COST = {
+    "archer": 1, "mage": 1, "cannon": 2,
+    "miner": 0, "barracks": 0
+}
 
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
@@ -79,27 +88,58 @@ HQ_HITBOX_Y1 = FIELD_OFFSET_Y + 9 * CELL_SIZE
 HQ_HITBOX_X2 = HQ_HITBOX_X1 + 2 * CELL_SIZE
 HQ_HITBOX_Y2 = HQ_HITBOX_Y1 + 2 * CELL_SIZE
 
-LANES = {
-    "left": [(0,10), (2,10), (2,8), (4,8), (4,10), (6,10), (6,12), (8,12), (8,10), (9,10)],
-    "right": [(19,10), (17,10), (17,12), (15,12), (15,10), (13,10), (13,8), (11,8), (11,10), (10,10)],
-    "top": [(10,0), (10,2), (12,2), (12,4), (10,4), (10,6), (8,6), (8,8), (10,8), (10,9)],
-    "bottom": [(10,19), (10,17), (12,17), (12,15), (10,15), (10,13), (8,13), (8,11), (10,11), (10,10)]
+PATH_CELLS = {
+    (17, 0), (16, 1), (17, 1), (13, 2), (14, 2), (15, 2), (16, 2),
+    (13, 3), (12, 4), (13, 4), (12, 5), (10, 6), (11, 6), (12, 6),
+    (10, 7), (4, 8), (5, 8), (6, 8), (7, 8), (10, 8), (3, 9),
+    (4, 9), (7, 9), (2, 10), (3, 10), (7, 10), (8, 10), (2, 11),
+    (10, 11), (11, 11), (12, 11), (1, 12), (2, 12), (12, 12),
+    (13, 12), (0, 13), (1, 13), (13, 13), (13, 14), (13, 15),
+    (13, 16), (13, 17), (14, 17), (14, 18), (15, 18), (15, 19)
 }
 
-ALL_PATH_CELLS = set()
-for lane_cells in LANES.values():
-    for i in range(len(lane_cells) - 1):
-        x1, y1 = lane_cells[i]
-        x2, y2 = lane_cells[i+1]
-        if x1 == x2:
-            step = 1 if y2 > y1 else -1
-            for y in range(y1, y2 + step, step):
-                ALL_PATH_CELLS.add((x1, y))
-        elif y1 == y2:
-            step = 1 if x2 > x1 else -1
-            for x in range(x1, x2 + step, step):
-                ALL_PATH_CELLS.add((x, y1))
+LANES = {
+    "top_right": [
+        (17, 0), (17, 1), (16, 1), (16, 2), (15, 2), (14, 2),
+        (13, 2), (13, 3), (13, 4), (12, 4), (12, 5), (12, 6),
+        (11, 6), (10, 6), (10, 7), (10, 8), (10, 9)
+    ],
+    "left": [
+        (0, 13), (1, 13), (1, 12), (2, 12), (2, 11), (2, 10),
+        (3, 10), (3, 9), (4, 9), (4, 8), (5, 8), (6, 8),
+        (7, 8), (7, 9), (7, 10), (8, 10), (9, 10)
+    ],
+    "bottom_right": [
+        (15, 19), (15, 18), (14, 18), (14, 17), (13, 17), (13, 16),
+        (13, 15), (13, 14), (13, 13), (13, 12), (12, 12), (12, 11),
+        (11, 11), (10, 11), (10, 10)
+    ]
+}
+
+ALL_PATH_CELLS = set(PATH_CELLS)
 ALL_PATH_CELLS.update(HQ_CELLS)
+
+def validate_map():
+    for cell in PATH_CELLS | HQ_CELLS:
+        x, y = cell
+        if not (0 <= x < GRID_WIDTH and 0 <= y < GRID_HEIGHT):
+            raise ValueError(f"Map cell outside grid: {cell}")
+
+    for lane_name, cells in LANES.items():
+        if len(cells) < 2:
+            raise ValueError(f"Lane '{lane_name}' is too short")
+        if cells[-1] not in HQ_CELLS:
+            raise ValueError(f"Lane '{lane_name}' must end at HQ")
+        for cell in cells[:-1]:
+            if cell not in PATH_CELLS:
+                raise ValueError(f"Lane '{lane_name}' uses non-path cell: {cell}")
+        for current_cell, next_cell in zip(cells, cells[1:]):
+            dx = abs(current_cell[0] - next_cell[0])
+            dy = abs(current_cell[1] - next_cell[1])
+            if dx + dy != 1:
+                raise ValueError(f"Lane '{lane_name}' has disconnected cells: {current_cell} -> {next_cell}")
+
+validate_map()
 
 MAP_CORNERS = [
     (FIELD_OFFSET_X + CELL_SIZE // 2, FIELD_OFFSET_Y + CELL_SIZE // 2),
@@ -157,6 +197,13 @@ def find_nearest_path_cell(cell):
 
 def scaled(val):
     return int(val * SCALE)
+
+def draw_square_dot(surface, color, center, size, border_color=None, border_width=0):
+    size = max(1, int(size))
+    rect = pygame.Rect(int(center[0] - size // 2), int(center[1] - size // 2), size, size)
+    pygame.draw.rect(surface, color, rect)
+    if border_color and border_width > 0:
+        pygame.draw.rect(surface, border_color, rect, border_width)
 
 
 class AlliedUnit:
@@ -292,9 +339,9 @@ class Raider:
     def __init__(self, target_miner, spawn_pos, from_camp=False):
         self.target_miner = target_miner
         self.pos = list(spawn_pos)
-        self.max_hp = 51
+        self.max_hp = 42
         self.hp = self.max_hp
-        self.damage = 20
+        self.damage = 14
         # ИСПРАВЛЕНО: радиус атаки такой же, как у обычных мобов при атаке HQ
         self.attack_range = scaled(40)
         raw_speed = max(1, scaled(1.0))
@@ -306,14 +353,14 @@ class Raider:
         self.attack_cooldown = 0
         self.alive = True
         self.color = RAIDER_COLOR
-        self.reward = 15
+        self.reward = 25
         self.attacking_tower = None
         self.burn_timer = 0
         self.poison_timer = 0
         self.slow_timer = 0
-        self.phys_armor = 0.1
-        self.mag_armor = 0.1
-        self.evade = 0.15
+        self.phys_armor = 0.05
+        self.mag_armor = 0.05
+        self.evade = 0.08
         self.path_index = 0
         self.path = []
         self.lane = None
@@ -383,7 +430,7 @@ class Raider:
                 self.pos[0] += (dx / d) * self.speed
                 self.pos[1] += (dy / d) * self.speed
 
-    def take_damage(self, damage, damage_type):
+    def take_damage(self, damage, damage_type, damage_source=None):
         if damage_type == "physical":
             effective = damage * (1 - self.phys_armor)
         else:
@@ -410,9 +457,9 @@ class Raider:
         if not self.alive:
             return
         pygame.draw.rect(surface, self.color, (int(self.pos[0] - scaled(12)), int(self.pos[1] - scaled(12)), scaled(24), scaled(24)))
-        pygame.draw.circle(surface, WHITE, (int(self.pos[0]), int(self.pos[1] - scaled(4))), scaled(6))
-        pygame.draw.circle(surface, BLACK, (int(self.pos[0] - scaled(2)), int(self.pos[1] - scaled(5))), scaled(2))
-        pygame.draw.circle(surface, BLACK, (int(self.pos[0] + scaled(2)), int(self.pos[1] - scaled(5))), scaled(2))
+        draw_square_dot(surface, WHITE, (self.pos[0], self.pos[1] - scaled(4)), scaled(12))
+        draw_square_dot(surface, BLACK, (self.pos[0] - scaled(3), self.pos[1] - scaled(5)), scaled(3))
+        draw_square_dot(surface, BLACK, (self.pos[0] + scaled(3), self.pos[1] - scaled(5)), scaled(3))
         bar_width = scaled(24)
         pygame.draw.rect(surface, RED, (int(self.pos[0] - bar_width/2), int(self.pos[1] - scaled(20)), bar_width, scaled(4)))
         green_width = bar_width * (self.hp / self.max_hp)
@@ -478,22 +525,15 @@ class Enemy:
         self.lane = lane
         base_range = scaled(40)
         stats = {
-            "orc": {"hp": 100, "phys": 0, "mag": 0, "speed": scaled(1.0), "rise": False, "evade": 0.1,
-                    "attack": MELEE, "color": GREEN, "atk_dmg": 10, "atk_range": base_range, "atk_cd": 60},
-            "skeleton": {"hp": 50, "phys": 0.1, "mag": 0, "speed": scaled(0.77), "rise": True, "evade": 0,
-                         "attack": MELEE, "color": WHITE, "atk_dmg": 8, "atk_range": base_range, "atk_cd": 50},
-            "necromancer": {"hp": 400, "phys": 0, "mag": 0.8, "speed": scaled(0.63), "rise": False, "evade": 0,
-                            "attack": RANGE, "color": PURPLE, "atk_dmg": 25, "atk_range": scaled(120), "atk_cd": 70},
-            "ogr": {"hp": 800, "phys": 0.5, "mag": 0, "speed": scaled(0.47), "rise": False, "evade": 0,
-                    "attack": MELEE, "color": ORANGE, "atk_dmg": 40, "atk_range": scaled(45), "atk_cd": 80},
-            "dark_knight": {"hp": 350, "phys": 0.9, "mag": 0, "speed": scaled(0.7), "rise": False, "evade": 0,
-                            "attack": MELEE, "color": DARK_RED, "atk_dmg": 30, "atk_range": base_range, "atk_cd": 55},
-            "wurg": {"hp": 150, "phys": 0.1, "mag": 0.4, "speed": scaled(1.4), "rise": False, "evade": 0.3,
-                     "attack": MELEE, "color": YELLOW, "atk_dmg": 15, "atk_range": base_range, "atk_cd": 45},
-            "chaos_spawn": {"hp": 220, "phys": 0, "mag": 0.2, "speed": scaled(1.13), "rise": False, "evade": 0.7,
-                            "attack": MELEE, "color": RED, "atk_dmg": 20, "atk_range": base_range, "atk_cd": 40},
-            "hellbrute": {"hp": 1000, "phys": 0.9, "mag": 0.3, "speed": scaled(0.27), "rise": False, "evade": 0,
-                          "attack": MELEE, "color": (200, 0, 200), "atk_dmg": 50, "atk_range": scaled(50), "atk_cd": 100}
+            "orc": {"hp": 72, "phys": 0.1, "mag": -0.3, "speed": scaled(1.0), "rise": False, "evade": 0.03,
+                    "attack": MELEE, "color": GREEN, "atk_dmg": 9, "atk_range": base_range, "atk_cd": 65,
+                    "vulnerable_to": {"mage": 1.45}},
+            "wurg": {"hp": 68, "phys": 0.0, "mag": 0.1, "speed": scaled(1.5), "rise": False, "evade": 0.12,
+                     "attack": MELEE, "color": YELLOW, "atk_dmg": 11, "atk_range": base_range, "atk_cd": 55,
+                     "vulnerable_to": {"archer": 1.6}},
+            "hellbrute": {"hp": 480, "phys": 0.3, "mag": 0.05, "speed": scaled(0.38), "rise": False, "evade": 0,
+                          "attack": MELEE, "color": (200, 0, 200), "atk_dmg": 32, "atk_range": scaled(50), "atk_cd": 110,
+                          "vulnerable_to": {"cannon": 1.8}}
         }
         s = stats[enemy_type]
         self.max_hp = s["hp"]
@@ -511,6 +551,7 @@ class Enemy:
         self.attack_range = s["atk_range"]
         self.attack_cooldown_max = s["atk_cd"]
         self.attack_cooldown = 0
+        self.vulnerable_to = s.get("vulnerable_to", {})
 
         self.path = get_path_pixels(lane)
         self.path_index = 0
@@ -523,8 +564,7 @@ class Enemy:
         self.poison_timer = 0
         self.slow_timer = 0
 
-        rewards = {"orc": 10, "skeleton": 5, "necromancer": 50, "ogr": 40, "dark_knight": 30,
-                   "wurg": 20, "chaos_spawn": 25, "hellbrute": 60}
+        rewards = {"orc": 18, "wurg": 22, "hellbrute": 90}
         self.reward = rewards[enemy_type]
 
     def move(self, towers, hq, enemies, allied_units, raider_camps):
@@ -663,11 +703,13 @@ class Enemy:
             target.take_damage(self.attack_damage)
         self.attack_cooldown = self.attack_cooldown_max
 
-    def take_damage(self, damage, damage_type):
+    def take_damage(self, damage, damage_type, damage_source=None):
         if damage_type == "physical":
             effective = damage * (1 - self.phys_armor)
         else:
             effective = damage * (1 - self.mag_armor)
+        if damage_source in self.vulnerable_to:
+            effective *= self.vulnerable_to[damage_source]
         if random.random() < self.evade:
             effective = 0
         self.hp -= effective
@@ -687,22 +729,13 @@ class Enemy:
             self.poison_timer -= 1
 
     def draw(self, surface):
-        if self.enemy_type in ["orc", "ogr", "dark_knight"]:
+        if self.enemy_type == "orc":
             pygame.draw.rect(surface, self.color, (int(self.pos[0] - scaled(15)), int(self.pos[1] - scaled(15)), scaled(30), scaled(30)))
-        elif self.enemy_type == "skeleton":
-            pygame.draw.circle(surface, self.color, (int(self.pos[0]), int(self.pos[1])), scaled(15))
-        elif self.enemy_type == "necromancer":
-            pygame.draw.polygon(surface, self.color, [
-                (int(self.pos[0]), int(self.pos[1] - scaled(15))),
-                (int(self.pos[0] - scaled(12)), int(self.pos[1] + scaled(10))),
-                (int(self.pos[0] + scaled(12)), int(self.pos[1] + scaled(10)))
-            ])
         elif self.enemy_type == "wurg":
-            pygame.draw.ellipse(surface, self.color, (int(self.pos[0] - scaled(12)), int(self.pos[1] - scaled(18)), scaled(24), scaled(36)))
-        elif self.enemy_type == "chaos_spawn":
-            pygame.draw.rect(surface, self.color, (int(self.pos[0] - scaled(10)), int(self.pos[1] - scaled(20)), scaled(20), scaled(40)))
+            pygame.draw.rect(surface, self.color, (int(self.pos[0] - scaled(14)), int(self.pos[1] - scaled(18)), scaled(28), scaled(36)))
+            draw_square_dot(surface, WHITE, (self.pos[0], self.pos[1] - scaled(5)), scaled(8))
         elif self.enemy_type == "hellbrute":
-            pygame.draw.circle(surface, self.color, (int(self.pos[0]), int(self.pos[1])), scaled(20))
+            pygame.draw.rect(surface, self.color, (int(self.pos[0] - scaled(18)), int(self.pos[1] - scaled(18)), scaled(36), scaled(36)))
         bar_width = scaled(30)
         pygame.draw.rect(surface, RED, (int(self.pos[0] - bar_width/2), int(self.pos[1] - scaled(25)), bar_width, scaled(5)))
         green_width = bar_width * (self.hp / self.max_hp)
@@ -713,20 +746,20 @@ class SatanBoss(Enemy):
     def __init__(self, lane):
         super().__init__("hellbrute", lane)
         self.enemy_type = "satan"
-        self.max_hp = 8000
+        self.max_hp = 3800
         self.hp = self.max_hp
-        raw_speed = max(1, scaled(15))
+        raw_speed = max(1, scaled(0.55))
         self.speed = float(raw_speed)
         self.base_speed = float(raw_speed)
-        self.phys_armor = 0.5
-        self.mag_armor = 0.5
+        self.phys_armor = 0.35
+        self.mag_armor = 0.35
         self.evade = 0
         self.attack_range = scaled(60)
-        self.attack_damage = 80
-        self.attack_cooldown_max = 60
+        self.attack_damage = 50
+        self.attack_cooldown_max = 85
         self.attack_cooldown = 0
         self.color = (255, 0, 0)
-        self.reward = 500
+        self.reward = 750
         self.phase = 1
         self.minion_timer = 0
         self.minion_cooldown = 300
@@ -752,16 +785,16 @@ class SatanBoss(Enemy):
     def spawn_minions(self, game):
         if self.phase >= 2:
             self.minion_timer += 1
-            cooldown = 300 if self.phase == 2 else 180
+            cooldown = 360 if self.phase == 2 else 240
             if self.minion_timer >= cooldown:
                 self.minion_timer = 0
-                count = 2 if self.phase == 2 else 3
+                count = 1 if self.phase == 2 else 2
                 for _ in range(count):
                     offset_x = random.randint(-CELL_SIZE, CELL_SIZE)
                     offset_y = random.randint(-CELL_SIZE, CELL_SIZE)
                     spawn_pos = (self.pos[0] + offset_x, self.pos[1] + offset_y)
                     lane = random.choice(list(LANES.keys()))
-                    minion = Enemy("skeleton", lane)
+                    minion = Enemy("orc", lane)
                     minion.pos = list(spawn_pos)
                     minion.hp = minion.max_hp // 2
                     game.enemies.append(minion)
@@ -830,7 +863,8 @@ class SatanBoss(Enemy):
         else:
             color = (200, 0, 200)
         
-        pygame.draw.circle(surface, color, (int(self.pos[0]), int(self.pos[1])), rad)
+        pygame.draw.rect(surface, color, (int(self.pos[0] - rad), int(self.pos[1] - rad), rad * 2, rad * 2))
+        pygame.draw.rect(surface, WHITE, (int(self.pos[0] - rad), int(self.pos[1] - rad), rad * 2, rad * 2), max(1, scaled(3)))
         
         phase_txt = font_small.render(f"P{self.phase}", True, WHITE)
         surface.blit(phase_txt, (int(self.pos[0] - phase_txt.get_width()//2), int(self.pos[1] - rad - scaled(40))))
@@ -876,6 +910,9 @@ class Tower:
             self.stored_ore = 0
             self.attack_mode = False
             self.mining_cooldown = 0
+            self.closed = False
+            self.mode_transition_timer = 0
+            self.mode_transition_max = 150
         elif tower_type == "barracks":
             self.spawn_point = find_nearest_path_cell(cell)
             self.allied_unit = None
@@ -935,6 +972,8 @@ class Tower:
             self.damage_type = "magical"
 
     def take_damage(self, damage):
+        if self.tower_type == "miner" and getattr(self, "closed", False):
+            return
         self.hp -= damage
         if self.hp <= 0:
             self.hp = 0
@@ -975,6 +1014,14 @@ class Tower:
                     self.respawn_timer = self.respawn_cooldown
             return
         if self.tower_type == "miner":
+            if self.mode_transition_timer > 0:
+                self.mode_transition_timer -= 1
+                if self.mode_transition_timer == 0:
+                    self.closed = not self.closed
+                    self.mining = not self.closed
+                return
+            if self.closed:
+                return
             if self.mining and not self.attack_mode:
                 self.mining_cooldown += 1
                 if self.mining_cooldown >= 30:
@@ -995,14 +1042,11 @@ class Tower:
                         self.projectiles.append([target, list((self.x, self.y))])
                         self.cooldown = self.cooldown_max
         else:
-            if game.ore <= 0:
-                return
             if self.cooldown > 0:
                 self.cooldown -= 1
             if self.cooldown == 0:
                 target = self.find_target(enemies, raider_camps, raiders)
-                if target:
-                    game.ore -= 1
+                if target and game.pay_shot(self):
                     self.projectiles.append([target, list((self.x, self.y))])
                     self.cooldown = self.cooldown_max
 
@@ -1023,7 +1067,7 @@ class Tower:
                 if isinstance(target, RaiderCamp):
                     target.take_damage(self.damage)
                 else:
-                    target.take_damage(self.damage, self.damage_type)
+                    target.take_damage(self.damage, self.damage_type, self.tower_type)
                 
                 if self.tower_type == "cannon" and not isinstance(target, RaiderCamp):
                     splash_radius = scaled(60)
@@ -1032,12 +1076,12 @@ class Tower:
                         if e is not target and e.alive:
                             d = math.hypot(e.pos[0] - target.pos[0], e.pos[1] - target.pos[1])
                             if d <= splash_radius:
-                                e.take_damage(splash_damage, self.damage_type)
+                                e.take_damage(splash_damage, self.damage_type, self.tower_type)
                     for r in raiders:
                         if r is not target and r.alive:
                             d = math.hypot(r.pos[0] - target.pos[0], r.pos[1] - target.pos[1])
                             if d <= splash_radius:
-                                r.take_damage(splash_damage, self.damage_type)
+                                r.take_damage(splash_damage, self.damage_type, self.tower_type)
                 
                 if self.specialization == "ice" and not isinstance(target, RaiderCamp):
                     target.slow_timer = 60
@@ -1055,7 +1099,7 @@ class Tower:
                                 chain_targets.append((d, e))
                     chain_targets.sort(key=lambda x: x[0])
                     for _, e in chain_targets[:2]:
-                        e.take_damage(int(self.damage * 0.5), self.damage_type)
+                        e.take_damage(int(self.damage * 0.5), self.damage_type, self.tower_type)
                 self.projectiles.remove(proj)
             else:
                 pos[0] += (dx / dist) * speed
@@ -1075,7 +1119,13 @@ class Tower:
             if self.spawn_point is not None:
                 leash_r = AlliedUnit.LEASH_RADIUS_CELLS * CELL_SIZE
                 leash_surf = pygame.Surface((leash_r * 2, leash_r * 2), pygame.SRCALPHA)
-                pygame.draw.circle(leash_surf, (70, 130, 230, 40), (leash_r, leash_r), leash_r)
+                step = max(1, CELL_SIZE)
+                for sx in range(0, leash_r * 2, step):
+                    for sy in range(0, leash_r * 2, step):
+                        dx = abs(sx - leash_r)
+                        dy = abs(sy - leash_r)
+                        if dx + dy <= leash_r:
+                            pygame.draw.rect(leash_surf, (70, 130, 230, 40), (sx, sy, step, step))
                 surface.blit(leash_surf, (int(self.spawn_point[0]) - leash_r, int(self.spawn_point[1]) - leash_r))
             if self.allied_unit is None and self.respawn_timer > 0:
                 ratio = 1 - (self.respawn_timer / self.respawn_cooldown)
@@ -1087,8 +1137,13 @@ class Tower:
                                  (int(self.allied_unit.pos[0]), int(self.allied_unit.pos[1])), max(1, scaled(2)))
         elif self.tower_type == "miner":
             rect_size = scaled(30)
-            pygame.draw.rect(surface, self.color, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size))
-            if self.attack_mode:
+            color = GRAY if self.closed else self.color
+            pygame.draw.rect(surface, color, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size))
+            if self.mode_transition_timer > 0:
+                ratio = 1 - self.mode_transition_timer / self.mode_transition_max
+                pygame.draw.rect(surface, BLACK, (self.x - rect_size//2, self.y + rect_size//2 + scaled(3), rect_size, scaled(4)))
+                pygame.draw.rect(surface, CYAN, (self.x - rect_size//2, self.y + rect_size//2 + scaled(3), int(rect_size * ratio), scaled(4)))
+            elif self.attack_mode:
                 pygame.draw.line(surface, RED, (self.x, self.y), (self.x + scaled(20), self.y - scaled(20)), scaled(3))
         elif self.tower_type == "mage":
             rect_size = scaled(36)
@@ -1096,17 +1151,19 @@ class Tower:
             if self.specialization:
                 spec_colors = {"ice": CYAN, "fire": (255, 100, 0), "poison": (100, 255, 100), "lightning": GOLD}
                 spec_color = spec_colors.get(self.specialization, WHITE)
-                pygame.draw.circle(surface, spec_color, (self.x, self.y - rect_size//2 - scaled(8)), scaled(6))
+                draw_square_dot(surface, spec_color, (self.x, self.y - rect_size//2 - scaled(8)), scaled(12), BLACK, max(1, scaled(1)))
         else:
             if self.tower_type == "archer":
-                pygame.draw.circle(surface, self.color, (self.x, self.y), scaled(20))
+                rect_size = scaled(38)
+                pygame.draw.rect(surface, self.color, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size))
+                pygame.draw.rect(surface, CYAN, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size), max(1, scaled(2)))
             elif self.tower_type == "cannon":
                 rect_size = scaled(44)
                 pygame.draw.rect(surface, self.color, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size))
-                pygame.draw.circle(surface, RED, (self.x, self.y), scaled(8))
+                draw_square_dot(surface, RED, (self.x, self.y), scaled(16))
 
         for proj in self.projectiles:
-            pygame.draw.circle(surface, self.proj_color, (int(proj[1][0]), int(proj[1][1])), scaled(5))
+            draw_square_dot(surface, self.proj_color, proj[1], scaled(10), WHITE, max(1, scaled(1)))
 
         bar_width = scaled(40)
         bar_y = self.y - scaled(40)
@@ -1132,7 +1189,7 @@ class OreVein:
         for cell in self.cells:
             x = FIELD_OFFSET_X + cell[0] * CELL_SIZE + CELL_SIZE//2
             y = FIELD_OFFSET_Y + cell[1] * CELL_SIZE + CELL_SIZE//2
-            pygame.draw.circle(surface, ORE_COLOR, (x, y), scaled(10))
+            draw_square_dot(surface, ORE_COLOR, (x, y), scaled(18), BLACK, max(1, scaled(1)))
         cx, cy = self.get_center()
         txt = font_small.render(str(self.amount), True, BLACK)
         surface.blit(txt, (cx - txt.get_width()//2, cy - txt.get_height()//2))
@@ -1142,7 +1199,7 @@ class Headquarters:
     def __init__(self):
         self.hp = 1000
         self.max_hp = 1000
-        self.ore_generation_timer = 0
+        self.gold_generation_timer = 0
         self.attack_range = scaled(220)
         self.attack_damage = 30
         self.attack_cooldown_max = 60
@@ -1176,10 +1233,10 @@ class Headquarters:
 
     def update(self, game):
         if game.first_wave_started:
-            self.ore_generation_timer += 1
-            if self.ore_generation_timer >= 180:
-                self.ore_generation_timer = 0
-                game.ore += 1
+            self.gold_generation_timer += 1
+            if self.gold_generation_timer >= CASTLE_GOLD_INTERVAL:
+                self.gold_generation_timer = 0
+                game.money += CASTLE_GOLD_INCOME
         
         if self.hp <= 0:
             return
@@ -1234,13 +1291,11 @@ class Headquarters:
         pygame.draw.rect(surface, BLACK, rect, scaled(4))
         pygame.draw.rect(surface, RED, rect, scaled(3))
         center = (int(HQ_CENTER_X), int(HQ_CENTER_Y))
-        pygame.draw.circle(surface, RED, center, scaled(15))
-        pygame.draw.circle(surface, BLACK, center, scaled(15), scaled(2))
+        draw_square_dot(surface, RED, center, scaled(30), BLACK, max(1, scaled(2)))
         
         for proj in self.projectiles:
             _, pos = proj
-            pygame.draw.circle(surface, GOLD, (int(pos[0]), int(pos[1])), scaled(7))
-            pygame.draw.circle(surface, WHITE, (int(pos[0]), int(pos[1])), scaled(4))
+            draw_square_dot(surface, GOLD, pos, scaled(14), WHITE, max(1, scaled(2)))
         
         bar_width = scaled(80)
         bar_y = rect.top - scaled(20)
@@ -1280,18 +1335,21 @@ class Game:
         self.radar_animation_duration = 60
         self.radar_animation_radius = 0
         self.radar_animation_max_radius = 3 * CELL_SIZE
+        self.revealed_cells = set()
+        self.scout_count = 0
+        self.reveal_cells_around((9, 9), 4)
         
         self.raider_spawn_timer = 0
-        self.raider_spawn_cooldown = 1200
+        self.raider_spawn_cooldown = 1800
         
-        self.wave_interval = 7200
+        self.wave_interval = 1200
         self.wave_interval_timer = 0
         self.wave_delay = 420
         self.wave_delay_timer = 0
         self.wave_delay_active = False
         self.waves_completed = 0
         
-        self.total_waves = 4
+        self.total_waves = 3
 
         self.waves = self.generate_waves()
         self.spawn_queue = []
@@ -1342,6 +1400,7 @@ class Game:
                         all_vein_cells.add(cell)
                     break
                 attempts += 1
+        self.update_discovered_veins()
 
     def get_vein_at(self, cell):
         for vein in self.veins:
@@ -1349,17 +1408,74 @@ class Game:
                 return vein
         return None
 
+    def update_discovered_veins(self):
+        for vein in self.veins:
+            if any(cell in self.revealed_cells for cell in vein.cells):
+                vein.discovered = True
+
+    def reveal_cells_around(self, center_cell, radius):
+        cx, cy = center_cell
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                cell = (cx + dx, cy + dy)
+                if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
+                    if abs(dx) + abs(dy) <= radius:
+                        self.revealed_cells.add(cell)
+        if hasattr(self, "veins"):
+            self.update_discovered_veins()
+
+    def is_revealed(self, cell):
+        return cell in self.revealed_cells or is_hq_cell(cell)
+
+    def get_active_miners(self):
+        return [
+            tower for tower in self.towers
+            if (tower.tower_type == "miner" and tower.hp > 0 and tower.mining
+                and not tower.attack_mode and tower.mode_transition_timer == 0)
+        ]
+
+    def can_pay_shot(self, tower):
+        cost = TOWER_ORE_COST.get(tower.tower_type, 1)
+        return self.ore >= cost
+
+    def pay_shot(self, tower):
+        cost = TOWER_ORE_COST.get(tower.tower_type, 1)
+        if cost <= 0:
+            return True
+        if self.can_pay_shot(tower):
+            self.ore -= cost
+            return True
+        return False
+
+    def get_scout_cost(self):
+        return BASE_SCOUT_COST + self.scout_count * SCOUT_COST_STEP
+
     def reveal_area(self, center_cell):
-        cost = 30
-        if self.money >= cost and not self.radar_animation_active:
+        cost = self.get_scout_cost()
+        if self.money >= cost:
             self.money -= cost
-            center_x = FIELD_OFFSET_X + center_cell[0] * CELL_SIZE + CELL_SIZE // 2
-            center_y = FIELD_OFFSET_Y + center_cell[1] * CELL_SIZE + CELL_SIZE // 2
-            self.radar_animation_center = (center_x, center_y)
-            self.radar_animation_active = True
+            self.scout_count += 1
+            self.radar_animation_center = None
+            self.radar_animation_active = False
             self.radar_animation_timer = 0
             self.radar_animation_radius = 0
             self.radar_mode = False
+            self.reveal_cells_around(center_cell, REVEAL_RADIUS_CELLS)
+
+    def draw_revealed_cells_overlay(self, surface):
+        overlay = pygame.Surface((FIELD_WIDTH, FIELD_HEIGHT), pygame.SRCALPHA)
+        for cell in self.revealed_cells:
+            if is_hq_cell(cell):
+                continue
+            rect = pygame.Rect(
+                cell[0] * CELL_SIZE + scaled(3),
+                cell[1] * CELL_SIZE + scaled(3),
+                CELL_SIZE - scaled(6),
+                CELL_SIZE - scaled(6)
+            )
+            pygame.draw.rect(overlay, (0, 210, 255, 38), rect)
+            pygame.draw.rect(overlay, (80, 235, 255, 70), rect, max(1, scaled(1)))
+        surface.blit(overlay, (FIELD_OFFSET_X, FIELD_OFFSET_Y))
 
     def update_radar_animation(self):
         if not self.radar_animation_active:
@@ -1382,6 +1498,7 @@ class Game:
                         cell_py = FIELD_OFFSET_Y + cell_y * CELL_SIZE + CELL_SIZE // 2
                         dist = math.hypot(cell_px - cx, cell_py - cy)
                         if dist <= self.radar_animation_radius:
+                            self.revealed_cells.add((cell_x, cell_y))
                             vein = self.get_vein_at((cell_x, cell_y))
                             if vein:
                                 vein.discovered = True
@@ -1395,30 +1512,32 @@ class Game:
             return
         
         cx, cy = self.radar_animation_center
-        
-        if self.radar_animation_radius > 0:
-            alpha = max(0, 255 - int(255 * (self.radar_animation_timer / self.radar_animation_duration)))
-            radar_surf = pygame.Surface((self.radar_animation_radius * 2, self.radar_animation_radius * 2), pygame.SRCALPHA)
-            pygame.draw.circle(radar_surf, (0, 255, 255, alpha), 
-                             (self.radar_animation_radius, self.radar_animation_radius), 
-                             self.radar_animation_radius, max(2, scaled(3)))
-            surface.blit(radar_surf, (cx - self.radar_animation_radius, cy - self.radar_animation_radius))
-            
-            fill_surf = pygame.Surface((self.radar_animation_radius * 2, self.radar_animation_radius * 2), pygame.SRCALPHA)
-            fill_alpha = max(0, 80 - int(80 * (self.radar_animation_timer / self.radar_animation_duration)))
-            pygame.draw.circle(fill_surf, (0, 255, 255, fill_alpha), 
-                             (self.radar_animation_radius, self.radar_animation_radius), 
-                             self.radar_animation_radius)
-            surface.blit(fill_surf, (cx - self.radar_animation_radius, cy - self.radar_animation_radius))
-        
+        center_cell = ((cx - FIELD_OFFSET_X) // CELL_SIZE, (cy - FIELD_OFFSET_Y) // CELL_SIZE)
+        reveal_progress = self.radar_animation_timer / self.radar_animation_duration
+        max_steps = max(1, REVEAL_RADIUS_CELLS)
+        active_steps = int(max_steps * reveal_progress) + 1
+        alpha = max(45, 190 - int(120 * reveal_progress))
+        for dx in range(-active_steps, active_steps + 1):
+            for dy in range(-active_steps, active_steps + 1):
+                if abs(dx) + abs(dy) <= active_steps:
+                    cell = (center_cell[0] + dx, center_cell[1] + dy)
+                    if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
+                        rect = pygame.Rect(
+                            FIELD_OFFSET_X + cell[0] * CELL_SIZE + scaled(3),
+                            FIELD_OFFSET_Y + cell[1] * CELL_SIZE + scaled(3),
+                            CELL_SIZE - scaled(6),
+                            CELL_SIZE - scaled(6)
+                        )
+                        pygame.draw.rect(surface, (0, 255, 255, alpha), rect)
+                        pygame.draw.rect(surface, CYAN, rect, max(1, scaled(2)))
         if self.radar_animation_timer % 10 < 5:
-            pygame.draw.circle(surface, CYAN, (cx, cy), max(4, scaled(6)))
+            draw_square_dot(surface, CYAN, (cx, cy), scaled(14), WHITE, max(1, scaled(2)))
 
     def generate_waves(self):
         waves = [
-            [("orc", 15), ("skeleton", 10), ("wurg", 5)],
-            [("orc", 20), ("dark_knight", 5), ("necromancer", 3), ("ogr", 3)],
-            [("hellbrute", 2), ("dark_knight", 8), ("chaos_spawn", 10), ("wurg", 10)],
+            [("orc", 18), ("wurg", 6)],
+            [("orc", 18), ("wurg", 12), ("hellbrute", 2)],
+            [("orc", 16), ("wurg", 12), ("hellbrute", 6)],
         ]
         return waves
 
@@ -1431,16 +1550,15 @@ class Game:
             if not self.first_wave_started:
                 self.first_wave_started = True
             
-            if self.wave == 4:
+            self.spawn_queue = []
+            for enemy_type, count in self.waves[self.wave - 1]:
+                for _ in range(count):
+                    lane = random.choice(list(LANES.keys()))
+                    self.spawn_queue.append((enemy_type, lane))
+            random.shuffle(self.spawn_queue)
+            if self.wave == self.total_waves:
                 lane = random.choice(list(LANES.keys()))
-                self.spawn_queue = [("satan", lane)]
-            else:
-                self.spawn_queue = []
-                for enemy_type, count in self.waves[self.wave - 1]:
-                    for _ in range(count):
-                        lane = random.choice(list(LANES.keys()))
-                        self.spawn_queue.append((enemy_type, lane))
-                random.shuffle(self.spawn_queue)
+                self.spawn_queue.append(("satan", lane))
             
             self.wave_active = True
             self.wave_timer = 0
@@ -1450,6 +1568,8 @@ class Game:
 
     def build_tower(self, tower_type, cell):
         if self.money < TOWER_COST[tower_type]:
+            return False
+        if not self.is_revealed(cell):
             return False
         for t in self.towers:
             if t.cell == cell:
@@ -1517,7 +1637,7 @@ class Game:
                 if t.tower_type == "barracks" and t.allied_unit is not None:
                     t.allied_unit.alive = False
                     t.allied_unit = None
-                refund = int(t.total_investment * 0.7)
+                refund = int(t.total_investment * 0.5)
                 self.money += refund
                 if t == self.selected_tower:
                     self.selected_tower = None
@@ -1528,14 +1648,20 @@ class Game:
     def toggle_miner_mode(self):
         if self.selected_tower and self.selected_tower.tower_type == "miner" and self.selected_tower.hp > 0:
             miner = self.selected_tower
-            if miner.attack_mode:
-                miner.attack_mode = False
-                miner.mining = True
-            else:
-                miner.attack_mode = True
-                miner.mining = False
+            if miner.mode_transition_timer > 0:
+                return False
+            miner.mode_transition_timer = miner.mode_transition_max
             return True
         return False
+
+    def draw_fog(self, surface):
+        fog = pygame.Surface((FIELD_WIDTH, FIELD_HEIGHT), pygame.SRCALPHA)
+        for x in range(GRID_WIDTH):
+            for y in range(GRID_HEIGHT):
+                if not self.is_revealed((x, y)):
+                    rect = pygame.Rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+                    pygame.draw.rect(fog, (12, 14, 18, 215), rect)
+        surface.blit(fog, (FIELD_OFFSET_X, FIELD_OFFSET_Y))
 
     def update(self):
         if self.defeat or self.victory:
@@ -1665,24 +1791,14 @@ class Game:
             self.wave_active = False
             self.wave += 1
             self.waves_completed += 1
+            self.wave_interval_timer = 0
             if self.wave > self.total_waves:
                 self.victory = True
             else:
                 self.post_wave_event()
 
     def post_wave_event(self):
-        if self.waves_completed % 2 == 0 and self.wave <= 3:
-            if self.money >= 150:
-                self.money -= 150
-            else:
-                if self.towers:
-                    t = random.choice(self.towers)
-                    if t.tower_type == "barracks" and t.allied_unit is not None:
-                        t.allied_unit.alive = False
-                        t.allied_unit = None
-                    self.towers.remove(t)
-                    if t == self.selected_tower:
-                        self.selected_tower = None
+        pass
 
     def draw_ui(self, surface):
         pygame.draw.rect(surface, PANEL_BG, (0, 0, SIDE_PANEL_WIDTH, SCREEN_HEIGHT))
@@ -1769,8 +1885,15 @@ class Game:
 
         miner_rect = pygame.Rect(right_x, btn_y, btn_width, btn_height)
         if self.selected_tower and self.selected_tower.tower_type == "miner":
-            mode_text = "Attack Mode" if not self.selected_tower.attack_mode else "Mine Mode"
-            color = RED if not self.selected_tower.attack_mode else GREEN
+            if self.selected_tower.mode_transition_timer > 0:
+                mode_text = "Switching..."
+                color = CYAN
+            elif self.selected_tower.closed:
+                mode_text = "Open Miner"
+                color = GREEN
+            else:
+                mode_text = "Close Miner"
+                color = RED
             pygame.draw.rect(surface, color, miner_rect)
             surface.blit(font_small.render(mode_text, True, BLACK), (miner_rect.x + 8, miner_rect.y + btn_height//3))
         else:
@@ -1783,7 +1906,7 @@ class Game:
         color = CYAN if self.radar_mode else LIGHT_GRAY
         pygame.draw.rect(surface, color, radar_rect)
         pygame.draw.rect(surface, BLACK, radar_rect, 2)
-        surface.blit(font_small.render("Radar (30$)", True, BLACK), (radar_rect.x + 8, radar_rect.y + btn_height//3))
+        surface.blit(font_small.render(f"Scout (${self.get_scout_cost()})", True, BLACK), (radar_rect.x + 8, radar_rect.y + btn_height//3))
 
         if self.selected_tower and self.selected_tower.hp > 0:
             rect = pygame.Rect(self.selected_tower.x - scaled(25), self.selected_tower.y - scaled(25), scaled(50), scaled(50))
@@ -1856,6 +1979,14 @@ while running:
 
         if event.type == pygame.MOUSEBUTTONDOWN:
             pos = pygame.mouse.get_pos()
+            if event.button == 3:
+                if SIDE_PANEL_WIDTH <= pos[0] < SCREEN_WIDTH - SIDE_PANEL_WIDTH:
+                    cell = cell_from_pos(pos)
+                    if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
+                        game.sell_tower(cell)
+                continue
+            if event.button != 1:
+                continue
             
             if game.mage_upgrade_pending:
                 menu_w = scaled(400)
@@ -1973,6 +2104,8 @@ while running:
                 pygame.draw.rect(screen, GREEN, rect)
                 pygame.draw.rect(screen, GRAY, rect, 1)
 
+    game.draw_revealed_cells_overlay(screen)
+
     for vein in game.veins:
         vein.draw(screen)
 
@@ -1992,6 +2125,8 @@ while running:
         raider.draw(screen)
 
     game.hq.draw(screen)
+
+    game.draw_fog(screen)
 
     game.draw_radar_animation(screen)
 
