@@ -39,6 +39,7 @@ MIN_ZOOM = max(VIEWPORT_WIDTH / FIELD_WIDTH, VIEWPORT_HEIGHT / FIELD_HEIGHT)
 MAX_ZOOM = 1.9
 START_ZOOM = min(MAX_ZOOM, max(MIN_ZOOM, 0.85))
 EDGE_SCROLL_SIZE = max(16, int(22 * SCALE))
+CAMERA_DRAG_THRESHOLD = max(6, int(10 * SCALE))
 
 TOWER_COST = {
     "lamp": 100,
@@ -126,7 +127,7 @@ RANGE = "range"
 MAX_RAIDERS_PER_MINER = 2
 
 HQ_MIN_X, HQ_MIN_Y = 19, 19
-HQ_SIZE_CELLS = 2
+HQ_SIZE_CELLS = 3
 HQ_CELLS = {
     (HQ_MIN_X + dx, HQ_MIN_Y + dy)
     for dx in range(HQ_SIZE_CELLS)
@@ -135,71 +136,71 @@ HQ_CELLS = {
 HQ_CENTER_X = FIELD_OFFSET_X + (HQ_MIN_X + HQ_SIZE_CELLS / 2) * CELL_SIZE
 HQ_CENTER_Y = FIELD_OFFSET_Y + (HQ_MIN_Y + HQ_SIZE_CELLS / 2) * CELL_SIZE
 GENERATOR_CELLS = set(HQ_CELLS)
+CASTLE_ROAD_CELLS = {
+    (x, y)
+    for x in range(HQ_MIN_X - 1, HQ_MIN_X + HQ_SIZE_CELLS + 1)
+    for y in range(HQ_MIN_Y - 1, HQ_MIN_Y + HQ_SIZE_CELLS + 1)
+    if (x, y) not in HQ_CELLS
+}
 BASE_CASTLE_LIGHT_MARGIN = 5
 CASTLE_LIGHT_ZONE = {
     (x, y)
     for x in range(HQ_MIN_X - BASE_CASTLE_LIGHT_MARGIN, HQ_MIN_X + HQ_SIZE_CELLS + BASE_CASTLE_LIGHT_MARGIN)
     for y in range(HQ_MIN_Y - BASE_CASTLE_LIGHT_MARGIN, HQ_MIN_Y + HQ_SIZE_CELLS + BASE_CASTLE_LIGHT_MARGIN)
 }
+
+def make_square_cells(left, top, size):
+    return frozenset(
+        (left + dx, top + dy)
+        for dx in range(size)
+        for dy in range(size)
+    )
+
+INITIAL_CANNON_FOOTPRINTS = (
+    make_square_cells(HQ_MIN_X - 3, HQ_MIN_Y - 3, 2),
+    make_square_cells(HQ_MIN_X + HQ_SIZE_CELLS + 1, HQ_MIN_Y - 3, 2),
+    make_square_cells(HQ_MIN_X - 3, HQ_MIN_Y + HQ_SIZE_CELLS + 1, 2),
+    make_square_cells(HQ_MIN_X + HQ_SIZE_CELLS + 1, HQ_MIN_Y + HQ_SIZE_CELLS + 1, 2),
+)
 CANNON_CELLS = {
-    (HQ_MIN_X - 1, HQ_MIN_Y - 1),
-    (HQ_MIN_X + 2, HQ_MIN_Y - 1),
-    (HQ_MIN_X - 1, HQ_MIN_Y + 2),
-    (HQ_MIN_X + 2, HQ_MIN_Y + 2)
+    cell
+    for footprint in INITIAL_CANNON_FOOTPRINTS
+    for cell in footprint
 }
 
 HQ_HITBOX_X1 = FIELD_OFFSET_X + HQ_MIN_X * CELL_SIZE
 HQ_HITBOX_Y1 = FIELD_OFFSET_Y + HQ_MIN_Y * CELL_SIZE
-HQ_HITBOX_X2 = HQ_HITBOX_X1 + 2 * CELL_SIZE
-HQ_HITBOX_Y2 = HQ_HITBOX_Y1 + 2 * CELL_SIZE
+HQ_HITBOX_X2 = HQ_HITBOX_X1 + HQ_SIZE_CELLS * CELL_SIZE
+HQ_HITBOX_Y2 = HQ_HITBOX_Y1 + HQ_SIZE_CELLS * CELL_SIZE
+
+def make_lane_path(points):
+    cells = []
+    for index, (x, y) in enumerate(points):
+        if index == 0:
+            cells.append((x, y))
+            continue
+
+        prev_x, prev_y = cells[-1]
+        if prev_x != x and prev_y != y:
+            raise ValueError(f"Lane waypoint is diagonal: {(prev_x, prev_y)} -> {(x, y)}")
+
+        if prev_x == x:
+            step = 1 if y > prev_y else -1
+            for current_y in range(prev_y + step, y + step, step):
+                cells.append((x, current_y))
+        else:
+            step = 1 if x > prev_x else -1
+            for current_x in range(prev_x + step, x + step, step):
+                cells.append((current_x, y))
+    return cells
 
 LANES = {
-    "north_a": [
-        (6, 0), (6, 1), (6, 2), (6, 3), (6, 4), (6, 5),
-        (7, 5), (8, 5), (9, 5), (10, 5), (11, 5), (12, 5),
-        (12, 6), (12, 7), (12, 8), (12, 9), (12, 10),
-        (13, 10), (14, 10), (15, 10), (16, 10), (16, 11),
-        (16, 12), (16, 13), (16, 14), (16, 15), (16, 16),
-        (17, 16), (18, 16), (19, 16), (19, 17), (19, 18), (19, 19)
-    ],
-    "north_b": [
-        (30, 0), (30, 1), (30, 2), (30, 3), (30, 4), (30, 5),
-        (30, 6), (30, 7), (29, 7), (28, 7), (27, 7), (26, 7),
-        (26, 8), (26, 9), (26, 10), (26, 11), (26, 12), (26, 13),
-        (25, 13), (24, 13), (23, 13), (23, 14), (23, 15),
-        (23, 16), (23, 17), (23, 18), (22, 18), (22, 19),
-        (21, 19), (20, 19)
-    ],
-    "west_a": [
-        (0, 16), (1, 16), (2, 16), (3, 16), (4, 16), (5, 16),
-        (6, 16), (7, 16), (8, 16), (9, 16), (10, 16), (11, 16),
-        (12, 16), (13, 16), (13, 17), (13, 18), (13, 19),
-        (13, 20), (14, 20), (15, 20), (16, 20), (17, 20),
-        (18, 20), (19, 20)
-    ],
-    "west_b": [
-        (0, 30), (1, 30), (2, 30), (3, 30), (4, 30), (5, 30),
-        (6, 30), (7, 30), (8, 30), (9, 30), (10, 30), (10, 29),
-        (10, 28), (10, 27), (10, 26), (10, 25), (11, 25),
-        (12, 25), (13, 25), (14, 25), (15, 25), (16, 25),
-        (16, 24), (16, 23), (16, 22), (17, 22), (18, 22),
-        (19, 22), (19, 21), (19, 20)
-    ],
-    "south_east_a": [
-        (40, 25), (39, 25), (38, 25), (37, 25), (36, 25), (35, 25),
-        (34, 25), (33, 25), (32, 25), (32, 24), (32, 23),
-        (32, 22), (32, 21), (31, 21), (30, 21), (29, 21),
-        (28, 21), (27, 21), (26, 21), (25, 21), (24, 21),
-        (24, 20), (23, 20), (22, 20), (21, 20), (20, 20)
-    ],
-    "south_east_b": [
-        (31, 40), (31, 39), (31, 38), (31, 37), (31, 36), (31, 35),
-        (31, 34), (30, 34), (29, 34), (28, 34), (27, 34),
-        (26, 34), (26, 33), (26, 32), (26, 31), (26, 30),
-        (26, 29), (25, 29), (24, 29), (23, 29), (22, 29),
-        (22, 28), (22, 27), (22, 26), (22, 25), (22, 24),
-        (21, 24), (20, 24), (20, 23), (20, 22), (20, 21), (20, 20)
-    ]
+    "north_a": make_lane_path([(6, 0), (6, 4), (10, 4), (10, 9), (13, 9), (13, 14), (15, 14), (15, 18), (18, 18)]),
+    "north_b": make_lane_path([(30, 0), (30, 6), (27, 6), (27, 11), (24, 11), (24, 15), (21, 15), (21, 18)]),
+    "west_a": make_lane_path([(0, 16), (7, 16), (7, 19), (12, 19), (12, 20), (18, 20)]),
+    "west_b": make_lane_path([(0, 30), (6, 30), (6, 27), (11, 27), (11, 25), (14, 25), (14, 22), (18, 22)]),
+    "south_east_a": make_lane_path([(40, 25), (36, 25), (36, 23), (32, 23), (32, 21), (25, 21), (25, 20), (22, 20)]),
+    "south_east_b": make_lane_path([(31, 40), (31, 35), (28, 35), (28, 31), (25, 31), (25, 27), (22, 27), (22, 22)]),
 }
 
 ROAD_BRANCHES = {
@@ -218,6 +219,7 @@ LANE_TO_BRANCHES = {
 PATH_CELLS = set()
 for lane_cells in LANES.values():
     PATH_CELLS.update(lane_cells)
+PATH_CELLS.update(CASTLE_ROAD_CELLS)
 PATH_CELLS.difference_update(HQ_CELLS)
 
 ALL_PATH_CELLS = set(PATH_CELLS)
@@ -232,8 +234,8 @@ def validate_map():
     for lane_name, cells in LANES.items():
         if len(cells) < 2:
             raise ValueError(f"Lane '{lane_name}' is too short")
-        if cells[-1] not in HQ_CELLS:
-            raise ValueError(f"Lane '{lane_name}' must end at HQ")
+        if cells[-1] not in CASTLE_ROAD_CELLS:
+            raise ValueError(f"Lane '{lane_name}' must end at the castle road ring")
         for cell in cells[:-1]:
             if cell not in PATH_CELLS:
                 raise ValueError(f"Lane '{lane_name}' uses non-path cell: {cell}")
@@ -315,6 +317,22 @@ def draw_square_dot(surface, color, center, size, border_color=None, border_widt
     pygame.draw.rect(surface, color, rect)
     if border_color and border_width > 0:
         pygame.draw.rect(surface, border_color, rect, border_width)
+
+def cells_world_rect(cells):
+    min_x = min(cell[0] for cell in cells)
+    max_x = max(cell[0] for cell in cells)
+    min_y = min(cell[1] for cell in cells)
+    max_y = max(cell[1] for cell in cells)
+    return pygame.Rect(
+        FIELD_OFFSET_X + min_x * CELL_SIZE,
+        FIELD_OFFSET_Y + min_y * CELL_SIZE,
+        (max_x - min_x + 1) * CELL_SIZE,
+        (max_y - min_y + 1) * CELL_SIZE
+    )
+
+def cells_world_center(cells):
+    rect = cells_world_rect(cells)
+    return rect.centerx, rect.centery
 
 
 class AlliedUnit:
@@ -1065,18 +1083,18 @@ class SatanBoss(Enemy):
 
 
 class Tower:
-    def __init__(self, tower_type, cell, fixed=False):
+    def __init__(self, tower_type, cell, fixed=False, cells=None):
         self.tower_type = tower_type
-        self.cell = cell
+        self.cells = set(cells) if cells is not None else {cell}
+        self.cell = min(self.cells)
         self.fixed = fixed
-        self.x = FIELD_OFFSET_X + cell[0] * CELL_SIZE + CELL_SIZE//2
-        self.y = FIELD_OFFSET_Y + cell[1] * CELL_SIZE + CELL_SIZE//2
+        self.x, self.y = cells_world_center(self.cells)
         self.level = 1
         base_range = scaled(150)
         stats = {
             "archer": {"damage": 15, "range": base_range, "cooldown": 30, "color": BLUE, "proj_color": CYAN, "hp": 150, "dmg_type": "physical"},
             "mage": {"damage": 20, "range": scaled(120), "cooldown": 40, "color": PURPLE, "proj_color": (255, 0, 255), "hp": 120, "dmg_type": "magical"},
-            "cannon": {"damage": 80, "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": ORANGE, "proj_color": (255, 100, 0), "hp": 220, "dmg_type": "physical"},
+            "cannon": {"damage": 80, "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": LIGHT_BLUE, "proj_color": (255, 100, 0), "hp": 220, "dmg_type": "physical"},
             "miner": {"damage": 10, "range": scaled(100), "cooldown": 40, "color": ORE_COLOR, "proj_color": ORE_COLOR, "hp": 150, "dmg_type": "physical"},
             "barracks": {"damage": 0, "range": 0, "cooldown": 0, "color": (100, 60, 30), "proj_color": (100, 60, 30), "hp": 300, "dmg_type": "physical"},
             "lamp": {"damage": 0, "range": 0, "cooldown": 0, "color": LIGHT_BLUE, "proj_color": LIGHT_BLUE, "hp": 105, "dmg_type": "physical"},
@@ -1117,6 +1135,12 @@ class Tower:
             self.allied_unit = None
             self.respawn_timer = 0
             self.respawn_cooldown = 300
+
+    def contains_cell(self, cell):
+        return cell in self.cells
+
+    def world_rect(self):
+        return cells_world_rect(self.cells)
 
     def upgrade(self):
         if self.level < 4:
@@ -1467,11 +1491,11 @@ class Tower:
                 pygame.draw.rect(surface, self.color, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size))
                 pygame.draw.rect(surface, CYAN, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size), max(1, scaled(2)))
             elif self.tower_type == "cannon":
-                rect_size = scaled(44)
                 cannon_color = GRAY if self.broken else self.color
-                rect = pygame.Rect(self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size)
+                rect = self.world_rect().inflate(-scaled(6), -scaled(6))
                 pygame.draw.rect(surface, cannon_color, rect)
-                draw_square_dot(surface, RED, (self.x, self.y), scaled(16))
+                pygame.draw.rect(surface, BLACK, rect, max(1, scaled(2)))
+                draw_square_dot(surface, RED, (self.x, self.y), scaled(20), WHITE, max(1, scaled(1)))
                 if self.broken:
                     pygame.draw.line(surface, RED, rect.topleft, rect.bottomright, max(2, scaled(3)))
                     pygame.draw.line(surface, RED, rect.topright, rect.bottomleft, max(2, scaled(3)))
@@ -1518,6 +1542,7 @@ class Hive:
         self.x = FIELD_OFFSET_X + self.cell[0] * CELL_SIZE + CELL_SIZE // 2
         self.y = FIELD_OFFSET_Y + self.cell[1] * CELL_SIZE + CELL_SIZE // 2
         self.hp = 1
+        self.max_hp = 1
         self.is_alive = True
         self.is_visible = False
 
@@ -1691,8 +1716,8 @@ class Headquarters:
         rect = pygame.Rect(
             FIELD_OFFSET_X + HQ_MIN_X * CELL_SIZE,
             FIELD_OFFSET_Y + HQ_MIN_Y * CELL_SIZE,
-            2 * CELL_SIZE,
-            2 * CELL_SIZE
+            HQ_SIZE_CELLS * CELL_SIZE,
+            HQ_SIZE_CELLS * CELL_SIZE
         )
         pygame.draw.rect(surface, GOLD, rect)
         pygame.draw.rect(surface, BLACK, rect, scaled(4))
@@ -1721,7 +1746,10 @@ class Game:
         self.wave_active = False
         self.wave_timer = 0
         self.enemies = []
-        self.towers = [Tower("cannon", cell, fixed=True) for cell in sorted(CANNON_CELLS)]
+        self.towers = [
+            Tower("cannon", min(footprint), fixed=True, cells=footprint)
+            for footprint in INITIAL_CANNON_FOOTPRINTS
+        ]
         self.allied_units = []
         self.raiders = []
         self.raider_camps = []
@@ -1733,6 +1761,7 @@ class Game:
         self.build_direction_index = 1
         self.victory = False
         self.defeat = False
+        self.paused = False
         self.hq = Headquarters()
         self.hives = [Hive(road_key) for road_key in ROAD_KEYS]
         self.bonuses = self.generate_bonuses()
@@ -1764,6 +1793,9 @@ class Game:
         self.camera_y = HQ_CENTER_Y - VIEWPORT_HEIGHT / self.zoom / 2
         self.dragging_camera = False
         self.last_drag_pos = None
+        self.drag_start_pos = None
+        self.drag_moved = False
+        self.camera_drag_button = None
         self.clamp_camera()
         self.update_lighting()
         self.start_wave(early=False)
@@ -1800,7 +1832,39 @@ class Game:
         self.camera_y += dy
         self.clamp_camera()
 
+    def begin_camera_drag(self, pos, button):
+        self.dragging_camera = True
+        self.last_drag_pos = pos
+        self.drag_start_pos = pos
+        self.drag_moved = button == 2
+        self.camera_drag_button = button
+
+    def update_camera_drag(self, event):
+        if not self.dragging_camera:
+            return
+        if self.drag_start_pos is not None:
+            dx = event.pos[0] - self.drag_start_pos[0]
+            dy = event.pos[1] - self.drag_start_pos[1]
+            if math.hypot(dx, dy) >= CAMERA_DRAG_THRESHOLD:
+                self.drag_moved = True
+        if self.drag_moved:
+            self.pan_camera(-event.rel[0] * 1.8 / self.zoom, -event.rel[1] * 1.8 / self.zoom)
+        self.last_drag_pos = event.pos
+
+    def end_camera_drag(self, button):
+        if not self.dragging_camera or self.camera_drag_button != button:
+            return False
+        should_click = button == 1 and not self.drag_moved
+        self.dragging_camera = False
+        self.last_drag_pos = None
+        self.drag_start_pos = None
+        self.drag_moved = False
+        self.camera_drag_button = None
+        return should_click
+
     def update_camera(self):
+        if self.dragging_camera:
+            return
         keys = pygame.key.get_pressed()
         mouse_x, mouse_y = pygame.mouse.get_pos()
         speed = max(12, CELL_SIZE * 0.65) / self.zoom
@@ -1867,6 +1931,13 @@ class Game:
     def notify(self, text, duration=120):
         self.notification_text = text
         self.notification_timer = duration
+
+    def toggle_pause(self):
+        if self.defeat or self.victory:
+            return False
+        self.paused = not self.paused
+        self.notify("Paused" if self.paused else "Resumed")
+        return True
 
     def clear_selection(self):
         self.selected_tower_type = None
@@ -2067,7 +2138,7 @@ class Game:
             return False
         if getattr(tower, "disabled_timer", 0) > 0:
             return False
-        return tower.cell in current_lit
+        return any(cell in current_lit for cell in tower.cells)
 
     def calculate_lit_cells(self, excluded_tower=None, update_power_flags=False):
         castle_light_zone = self.get_castle_light_zone()
@@ -2096,9 +2167,10 @@ class Game:
         self.shadow_cells = set()
         self.lit_cells = lit
         light_tower_cells = {
-            tower.cell
+            cell
             for tower in self.towers
             if tower.tower_type in LIGHT_TOWER_TYPES and tower.hp > 0
+            for cell in tower.cells
         }
         self.revealed_cells = set(lit) | light_tower_cells
         if hasattr(self, "veins"):
@@ -2135,7 +2207,7 @@ class Game:
         if any((not bonus.is_collected) and bonus.cell == cell for bonus in getattr(self, "bonuses", [])):
             return False
         for tower in self.towers:
-            if tower.hp > 0 and tower.cell == cell:
+            if tower.hp > 0 and tower.contains_cell(cell):
                 return False
         return self.is_lit(cell)
 
@@ -2323,13 +2395,14 @@ class Game:
             return False
         if not self.can_use_action("sell"):
             return False
-        return tower.cell in self.calculate_lit_cells(excluded_tower=tower)
+        lit_without_tower = self.calculate_lit_cells(excluded_tower=tower)
+        return any(cell in lit_without_tower for cell in tower.cells)
 
     def sell_tower(self, cell):
         if not self.can_use_action("sell"):
             return False
         for t in self.towers:
-            if t.cell == cell:
+            if t.contains_cell(cell):
                 if getattr(t, "fixed", False):
                     return False
                 if not self.can_sell_tower(t):
@@ -2390,6 +2463,14 @@ class Game:
                 "rect": pygame.Rect(left_x, start_y + len(buttons) * (btn_height + btn_gap), btn_width, btn_height),
             })
         return buttons
+
+    def get_pause_button(self):
+        return {
+            "title": "Resume" if self.paused else "Pause",
+            "enabled": not self.defeat and not self.victory,
+            "selected": self.paused,
+            "rect": pygame.Rect(scaled(20), scaled(380), SIDE_PANEL_WIDTH - scaled(40), scaled(64)),
+        }
 
     def get_right_panel_buttons(self):
         buttons = []
@@ -2512,6 +2593,12 @@ class Game:
         return False
 
     def handle_left_panel_click(self, pos):
+        pause_button = self.get_pause_button()
+        if pause_button["rect"].collidepoint(pos):
+            if pause_button["enabled"]:
+                self.toggle_pause()
+            return True
+
         for button in self.get_left_build_buttons():
             if button["rect"].collidepoint(pos):
                 if button["enabled"]:
@@ -2524,6 +2611,37 @@ class Game:
                         self.selected_hive = None
                 return True
         return False
+
+    def handle_world_left_click(self, pos):
+        if not self.is_in_viewport(pos):
+            return False
+        cell = cell_from_pos(self.screen_to_world(pos))
+        if not (0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT):
+            return False
+
+        for bonus in self.bonuses:
+            if bonus.contains_cell(cell) and self.is_lit(bonus.cell):
+                self.collect_bonus(bonus)
+                return True
+
+        for hive in self.hives:
+            if hive.contains_cell(cell):
+                self.selected_hive = hive
+                self.selected_tower = None
+                self.selected_tower_type = None
+                return True
+
+        for tower in self.towers:
+            if tower.contains_cell(cell) and tower.hp > 0:
+                self.select_or_toggle_tower(tower)
+                return True
+
+        if self.selected_tower_type:
+            self.build_tower(self.selected_tower_type, cell)
+        else:
+            self.selected_tower = None
+            self.selected_hive = None
+        return True
 
     def draw_energy_icon(self, surface, center, size):
         x, y = center
@@ -2629,6 +2747,16 @@ class Game:
             rendered = font_medium.render(value, True, WHITE)
             surface.blit(rendered, (text_x, y))
             y += row_gap
+
+        pause_button = self.get_pause_button()
+        self.draw_panel_button(
+            surface,
+            pause_button["rect"],
+            pause_button["title"],
+            None,
+            pause_button["enabled"],
+            pause_button["selected"],
+        )
 
         build_label = font_small.render("Build", True, WHITE)
         build_buttons = self.get_left_build_buttons()
@@ -2789,12 +2917,7 @@ class Game:
         self.draw_light_preview(surface)
 
         if self.selected_tower and self.selected_tower.hp > 0:
-            rect = pygame.Rect(
-                self.selected_tower.x - scaled(25),
-                self.selected_tower.y - scaled(25),
-                scaled(50),
-                scaled(50)
-            )
+            rect = self.selected_tower.world_rect().inflate(scaled(8), scaled(8))
             pygame.draw.rect(surface, YELLOW, rect, scaled(3))
 
         if self.selected_hive and self.selected_hive.is_alive and self.selected_hive.is_visible:
@@ -2823,6 +2946,10 @@ class Game:
 
         if self.notification_timer > 0:
             self.notification_timer -= 1
+
+        if self.paused:
+            return
+
         self.tick_action_cooldowns()
 
         self.hq.update(self)
@@ -3010,6 +3137,8 @@ while running:
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 running = False
+            if event.key == pygame.K_p:
+                game.toggle_pause()
 
         if event.type == pygame.MOUSEWHEEL:
             pos = pygame.mouse.get_pos()
@@ -3017,18 +3146,19 @@ while running:
                 game.zoom_at(pos, 1.12 ** event.y)
 
         if event.type == pygame.MOUSEBUTTONUP:
-            if event.button == 2:
-                game.dragging_camera = False
-                game.last_drag_pos = None
+            if event.button in (1, 2):
+                pos = getattr(event, "pos", pygame.mouse.get_pos())
+                should_handle_click = game.end_camera_drag(event.button)
+                if should_handle_click:
+                    game.handle_world_left_click(pos)
 
         if event.type == pygame.MOUSEMOTION and game.dragging_camera:
-            game.pan_camera(-event.rel[0] * 1.8 / game.zoom, -event.rel[1] * 1.8 / game.zoom)
+            game.update_camera_drag(event)
 
         if event.type == pygame.MOUSEBUTTONDOWN:
             pos = pygame.mouse.get_pos()
             if event.button == 2 and game.is_in_viewport(pos):
-                game.dragging_camera = True
-                game.last_drag_pos = pos
+                game.begin_camera_drag(pos, event.button)
                 continue
             if event.button in (4, 5) and game.is_in_viewport(pos):
                 game.zoom_at(pos, 1.12 if event.button == 4 else 1 / 1.12)
@@ -3081,37 +3211,7 @@ while running:
             elif pos[0] < SIDE_PANEL_WIDTH:
                 game.handle_left_panel_click(pos)
             elif game.is_in_viewport(pos):
-                cell = cell_from_pos(game.screen_to_world(pos))
-                if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
-                    handled = False
-                    for bonus in game.bonuses:
-                        if bonus.contains_cell(cell) and game.is_lit(bonus.cell):
-                            game.collect_bonus(bonus)
-                            handled = True
-                            break
-                    if handled:
-                        continue
-
-                    for hive in game.hives:
-                        if hive.contains_cell(cell):
-                            game.selected_hive = hive
-                            game.selected_tower = None
-                            game.selected_tower_type = None
-                            handled = True
-                            break
-                    if handled:
-                        continue
-
-                    for t in game.towers:
-                        if t.cell == cell and t.hp > 0:
-                            game.select_or_toggle_tower(t)
-                            break
-                    else:
-                        if game.selected_tower_type:
-                            game.build_tower(game.selected_tower_type, cell)
-                        else:
-                            game.selected_tower = None
-                            game.selected_hive = None
+                game.begin_camera_drag(pos, event.button)
 
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_u:
