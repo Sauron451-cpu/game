@@ -71,6 +71,8 @@ TOWER_ORE_COST = {
 BUILDABLE_TOWER_TYPES = ["lamp", "beacon"]
 LIGHT_TOWER_TYPES = {"lamp", "beacon"}
 LIGHT_RADIUS_BY_TYPE = {"lamp": 3, "beacon": 1}
+LIGHT_SIZE_BY_LEVEL = {1: 5, 2: 7, 3: 9, 4: 11}
+LAMP_LIGHT_WIDTH = 3
 DIRECTIONS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 DIRECTION_NAMES = ["N", "E", "S", "W"]
 ROTATABLE_LIGHT_TYPES = {"lamp"}
@@ -123,11 +125,11 @@ HQ_CELLS = {
 HQ_CENTER_X = FIELD_OFFSET_X + (HQ_MIN_X + HQ_SIZE_CELLS / 2) * CELL_SIZE
 HQ_CENTER_Y = FIELD_OFFSET_Y + (HQ_MIN_Y + HQ_SIZE_CELLS / 2) * CELL_SIZE
 GENERATOR_CELLS = set(HQ_CELLS)
-BASE_CASTLE_LIGHT_MARGIN = 2
+BASE_CASTLE_LIGHT_MARGIN = 3
 CASTLE_LIGHT_ZONE = {
     (x, y)
-    for x in range(HQ_MIN_X - 2, HQ_MIN_X + 4)
-    for y in range(HQ_MIN_Y - 2, HQ_MIN_Y + 4)
+    for x in range(HQ_MIN_X - BASE_CASTLE_LIGHT_MARGIN, HQ_MIN_X + HQ_SIZE_CELLS + BASE_CASTLE_LIGHT_MARGIN)
+    for y in range(HQ_MIN_Y - BASE_CASTLE_LIGHT_MARGIN, HQ_MIN_Y + HQ_SIZE_CELLS + BASE_CASTLE_LIGHT_MARGIN)
 }
 CANNON_CELLS = {
     (HQ_MIN_X - 1, HQ_MIN_Y - 1),
@@ -1123,6 +1125,7 @@ class Tower:
         self.direction_index = 1
         self.broken = False
         self.disabled_timer = 0
+        self.is_powered = False
 
         if tower_type == "miner":
             self.mining = True
@@ -1143,8 +1146,6 @@ class Tower:
             cost = TOWER_UPGRADE_COST[self.tower_type]
             self.level += 1
             if self.tower_type in LIGHT_TOWER_TYPES:
-                if self.tower_type != "lamp":
-                    self.light_radius += 1
                 self.max_hp = int(self.max_hp * 1.25)
                 self.hp = self.max_hp
             elif self.tower_type == "miner":
@@ -1450,14 +1451,20 @@ class Tower:
         elif self.tower_type in LIGHT_TOWER_TYPES:
             rect_size = scaled(34 if self.tower_type == "lamp" else 42)
             is_disabled = self.disabled_timer > 0
-            body_color = GRAY if is_disabled else (self.color if self.level == 1 else (170, 240, 255))
+            is_powered = getattr(self, "is_powered", False) and not is_disabled
+            if is_disabled:
+                body_color = (82, 82, 82)
+            elif is_powered:
+                body_color = self.color if self.level == 1 else (170, 240, 255)
+            else:
+                body_color = (92, 108, 116)
             pygame.draw.rect(surface, body_color, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size))
             pygame.draw.rect(surface, BLACK, (self.x - rect_size//2, self.y - rect_size//2, rect_size, rect_size), max(1, scaled(2)))
-            if not is_disabled:
+            if is_powered:
                 glow_radius = scaled(10 + 4 * self.level)
                 pygame.draw.circle(surface, (255, 255, 205), (int(self.x), int(self.y)), glow_radius)
                 pygame.draw.circle(surface, GENERATOR_BLUE, (int(self.x), int(self.y)), max(2, glow_radius // 2), max(1, scaled(2)))
-            if self.tower_type == "lamp" and not is_disabled:
+            if self.tower_type == "lamp" and is_powered:
                 dx, dy = DIRECTIONS[self.direction_index]
                 length = scaled(24)
                 end = (self.x + dx * length, self.y + dy * length)
@@ -2081,106 +2088,86 @@ class Game:
                 return vein
         return None
 
-    def get_directed_light_cells(self, center_cell, direction_index, radius, width_for_step):
+    def get_light_size(self, tower):
+        level = max(1, min(4, tower.level))
+        return LIGHT_SIZE_BY_LEVEL[level]
+
+    def get_directed_light_cells(self, center_cell, direction_index, length, width):
         cells = set()
         cx, cy = center_cell
         dir_x, dir_y = DIRECTIONS[direction_index]
         side_x, side_y = -dir_y, dir_x
+        half_width = max(0, width // 2)
 
         def add_cell(cell):
             if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
                 cells.add(cell)
 
-        def bounded_dilate(source_cells, times):
-            expanded = {
-                (x, y) for x, y in source_cells
-                if 0 <= x < GRID_WIDTH and 0 <= y < GRID_HEIGHT
-            }
-            for _ in range(times):
-                next_cells = set(expanded)
-                for x, y in expanded:
-                    for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                        if 0 <= nx < GRID_WIDTH and 0 <= ny < GRID_HEIGHT:
-                            next_cells.add((nx, ny))
-                expanded = next_cells
-            return expanded
-
-        def offset_sequence(width):
-            offsets = [0]
-            distance = 1
-            while len(offsets) < width:
-                offsets.append(distance)
-                if len(offsets) < width:
-                    offsets.append(-distance)
-                distance += 1
-            return offsets[:width]
-
-        add_cell(center_cell)
-        if dir_x != 0 and dir_y != 0:
-            width = max(1, width_for_step(1))
-            if width <= 1:
-                for step in range(1, radius + 1):
-                    add_cell((cx + dir_x * step, cy + dir_y * step))
-                return cells
-
-            ribbon = {center_cell}
-            previous = center_cell
-            for step in range(1, radius + 1):
-                base = (cx + dir_x * step, cy + dir_y * step)
-                ribbon.add(base)
-                ribbon.add((base[0], previous[1]))
-                ribbon.add((previous[0], base[1]))
-                previous = base
-            cells.update(bounded_dilate(ribbon, max(0, (width - 3) // 2)))
-            return cells
-
-        for step in range(1, radius + 1):
-            width = max(1, width_for_step(step))
+        for step in range(1, length + 1):
             base = (cx + dir_x * step, cy + dir_y * step)
-            for offset in offset_sequence(width):
+            for offset in range(-half_width, half_width + 1):
                 add_cell((base[0] + side_x * offset, base[1] + side_y * offset))
 
         return cells
 
-    def get_light_coverage(self, tower):
+    def get_beacon_light_cells(self, center_cell, size):
         cells = set()
-        cx, cy = tower.cell
-        radius = tower.light_radius
+        cx, cy = center_cell
+        radius = size // 2
+        edge_steps = 1 if size <= 7 else 2
 
-        if tower.tower_type == "lamp":
-            radius += tower.level - 1
-            width = 1
-            return self.get_directed_light_cells(tower.cell, tower.direction_index, radius, lambda step: width)
-
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
+        for dy in range(-radius, radius + 1):
+            distance_from_edge = radius - abs(dy)
+            corner_clip = max(0, edge_steps - distance_from_edge)
+            half_width = radius - corner_clip
+            for dx in range(-half_width, half_width + 1):
                 cell = (cx + dx, cy + dy)
                 if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
                     cells.add(cell)
         return cells
+
+    def get_light_coverage(self, tower):
+        size = self.get_light_size(tower)
+
+        if tower.tower_type == "lamp":
+            return self.get_directed_light_cells(tower.cell, tower.direction_index, size, LAMP_LIGHT_WIDTH)
+
+        if tower.tower_type == "beacon":
+            return self.get_beacon_light_cells(tower.cell, size)
+
+        return set()
 
     def light_source_has_power(self, tower, current_lit):
         if tower.hp <= 0 or tower.tower_type not in LIGHT_TOWER_TYPES:
             return False
         if getattr(tower, "disabled_timer", 0) > 0:
             return False
-        return True
+        return tower.cell in current_lit
 
     def update_lighting(self):
         castle_light_zone = self.get_castle_light_zone()
         lit = set(castle_light_zone) | set(GENERATOR_CELLS)
+        for tower in self.towers:
+            if tower.tower_type in LIGHT_TOWER_TYPES:
+                tower.is_powered = False
         changed = True
         while changed:
             changed = False
             for tower in self.towers:
                 if self.light_source_has_power(tower, lit):
+                    tower.is_powered = True
                     for cell in self.get_light_coverage(tower):
                         if cell not in lit:
                             lit.add(cell)
                             changed = True
         self.shadow_cells = set()
         self.lit_cells = lit
-        self.revealed_cells = set(lit)
+        light_tower_cells = {
+            tower.cell
+            for tower in self.towers
+            if tower.tower_type in LIGHT_TOWER_TYPES and tower.hp > 0
+        }
+        self.revealed_cells = set(lit) | light_tower_cells
         if hasattr(self, "veins"):
             self.update_discovered_veins()
         if hasattr(self, "hives"):
@@ -2236,7 +2223,7 @@ class Game:
             self.update_discovered_veins()
 
     def is_revealed(self, cell):
-        return self.is_lit(cell)
+        return cell in self.revealed_cells or self.is_lit(cell)
 
     def get_active_miners(self):
         return [
@@ -2584,7 +2571,7 @@ class Game:
         fog = pygame.Surface((FIELD_WIDTH, FIELD_HEIGHT), pygame.SRCALPHA)
         for x in range(GRID_WIDTH):
             for y in range(GRID_HEIGHT):
-                if not self.is_lit((x, y)):
+                if not self.is_revealed((x, y)):
                     rect = pygame.Rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
                     pygame.draw.rect(fog, FOG_WHITE + (255,), rect)
         surface.blit(fog, (FIELD_OFFSET_X, FIELD_OFFSET_Y))
@@ -2626,11 +2613,16 @@ class Game:
         mouse_pos = pygame.mouse.get_pos()
         preview_tower = None
 
-        if self.selected_tower and self.selected_tower.hp > 0 and self.selected_tower.tower_type in LIGHT_TOWER_TYPES:
+        if (
+            self.selected_tower
+            and self.selected_tower.hp > 0
+            and self.selected_tower.tower_type in LIGHT_TOWER_TYPES
+            and getattr(self.selected_tower, "is_powered", False)
+        ):
             preview_tower = self.selected_tower
         elif self.selected_tower_type in LIGHT_TOWER_TYPES and self.is_in_viewport(mouse_pos):
             cell = cell_from_pos(self.screen_to_world(mouse_pos))
-            if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
+            if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT and self.is_lit(cell):
                 preview_tower = self.make_preview_tower(self.selected_tower_type, cell)
 
         if not preview_tower:
