@@ -41,13 +41,13 @@ START_ZOOM = min(MAX_ZOOM, max(MIN_ZOOM, 0.85))
 EDGE_SCROLL_SIZE = max(16, int(22 * SCALE))
 
 TOWER_COST = {
-    "lamp": 45,
-    "beacon": 110
+    "lamp": 100,
+    "beacon": 150
 }
 TOWER_UPGRADE_COST = {
-    "lamp": 80,
-    "beacon": 150,
-    "cannon": 180
+    "lamp": 140,
+    "beacon": 200,
+    "cannon": 200
 }
 
 STARTING_MONEY = 210
@@ -59,9 +59,6 @@ GENERATOR_TOWER_LIMIT_BY_LEVEL = {1: 6, 2: 12, 3: 18, 4: 24}
 GENERATOR_UPGRADE_COST = {1: 300, 2: 600, 3: 1200}
 ARTILLERY_COST = 400
 REPAIR_CANNON_COST = 150
-REVEAL_RADIUS_CELLS = 3
-BASE_SCOUT_COST = 20
-SCOUT_COST_STEP = 8
 TOWER_ORE_COST = {
     "lamp": 0,
     "beacon": 0,
@@ -70,9 +67,22 @@ TOWER_ORE_COST = {
 
 BUILDABLE_TOWER_TYPES = ["lamp", "beacon"]
 LIGHT_TOWER_TYPES = {"lamp", "beacon"}
+TOWER_DISPLAY_NAMES = {
+    "lamp": "Observer",
+    "beacon": "Farseeker",
+    "cannon": "Cannon",
+    "mage": "Mage",
+    "miner": "Miner",
+    "barracks": "Barracks",
+}
 LIGHT_RADIUS_BY_TYPE = {"lamp": 3, "beacon": 1}
 LIGHT_SIZE_BY_LEVEL = {1: 5, 2: 7, 3: 9, 4: 11}
 LAMP_LIGHT_WIDTH = 3
+ACTION_COOLDOWN_FRAMES = {
+    "build": 18,
+    "rotate": 12,
+    "sell": 20,
+}
 DIRECTIONS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 DIRECTION_NAMES = ["N", "E", "S", "W"]
 ROTATABLE_LIGHT_TYPES = {"lamp"}
@@ -85,7 +95,7 @@ DIMMER_START_WAVE = 3
 DIMMER_LAMP_DISABLE_RADIUS = 3
 DIMMER_LAMP_DISABLE_DURATION = 120
 DIMMER_LAMP_DISABLE_COOLDOWN = 360
-LIGHT_DAMAGE_PER_SECOND = 1.8
+LIGHT_DAMAGE_PER_SECOND = 0
 
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
@@ -254,17 +264,6 @@ def get_path_pixels(lane_name):
     return [(FIELD_OFFSET_X + x * CELL_SIZE + CELL_SIZE // 2,
              FIELD_OFFSET_Y + y * CELL_SIZE + CELL_SIZE // 2) for (x, y) in cells]
 
-def get_nearest_path_index(lane_name, pos):
-    path = get_path_pixels(lane_name)
-    best_index = 0
-    best_dist = float('inf')
-    for i, point in enumerate(path):
-        d = math.hypot(point[0] - pos[0], point[1] - pos[1])
-        if d < best_dist:
-            best_dist = d
-            best_index = i
-    return min(best_index, max(0, len(path) - 2))
-
 def cell_from_pos(pos):
     x, y = pos
     grid_x = (x - FIELD_OFFSET_X) // CELL_SIZE
@@ -316,30 +315,6 @@ def draw_square_dot(surface, color, center, size, border_color=None, border_widt
     pygame.draw.rect(surface, color, rect)
     if border_color and border_width > 0:
         pygame.draw.rect(surface, border_color, rect, border_width)
-
-def get_line_cells(start_cell, end_cell):
-    x1, y1 = start_cell
-    x2, y2 = end_cell
-    cells = []
-    dx = abs(x2 - x1)
-    dy = abs(y2 - y1)
-    sx = 1 if x1 < x2 else -1
-    sy = 1 if y1 < y2 else -1
-    err = dx - dy
-
-    while True:
-        cells.append((x1, y1))
-        if x1 == x2 and y1 == y2:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            x1 += sx
-        if e2 < dx:
-            err += dx
-            y1 += sy
-
-    return cells
 
 
 class AlliedUnit:
@@ -1101,7 +1076,7 @@ class Tower:
         stats = {
             "archer": {"damage": 15, "range": base_range, "cooldown": 30, "color": BLUE, "proj_color": CYAN, "hp": 150, "dmg_type": "physical"},
             "mage": {"damage": 20, "range": scaled(120), "cooldown": 40, "color": PURPLE, "proj_color": (255, 0, 255), "hp": 120, "dmg_type": "magical"},
-            "cannon": {"damage": 28, "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 26, "color": ORANGE, "proj_color": (255, 100, 0), "hp": 220, "dmg_type": "physical"},
+            "cannon": {"damage": 80, "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": ORANGE, "proj_color": (255, 100, 0), "hp": 220, "dmg_type": "physical"},
             "miner": {"damage": 10, "range": scaled(100), "cooldown": 40, "color": ORE_COLOR, "proj_color": ORE_COLOR, "hp": 150, "dmg_type": "physical"},
             "barracks": {"damage": 0, "range": 0, "cooldown": 0, "color": (100, 60, 30), "proj_color": (100, 60, 30), "hp": 300, "dmg_type": "physical"},
             "lamp": {"damage": 0, "range": 0, "cooldown": 0, "color": LIGHT_BLUE, "proj_color": LIGHT_BLUE, "hp": 105, "dmg_type": "physical"},
@@ -1119,6 +1094,8 @@ class Tower:
         self.projectiles = []
         self.laser_beams = []
         self.damage_type = s["dmg_type"]
+        self.splash_radius = scaled(60) if tower_type == "cannon" else 0
+        self.splash_damage_multiplier = 0.5
         self.total_investment = 0 if fixed else TOWER_COST.get(tower_type, 0)
         self.specialization = None
         self.light_radius = LIGHT_RADIUS_BY_TYPE.get(tower_type, 0)
@@ -1173,34 +1150,31 @@ class Tower:
 
     def apply_specialization(self, spec_type):
         self.specialization = spec_type
-        if spec_type == "ice":
-            self.color = CYAN
-            self.proj_color = (200, 230, 255)
-            self.damage = 8
-            self.range = scaled(110)
-            self.cooldown_max = 25
-            self.damage_type = "magical"
-        elif spec_type == "fire":
-            self.color = (220, 50, 0)
-            self.proj_color = (255, 100, 0)
-            self.damage = 22
-            self.range = scaled(120)
-            self.cooldown_max = 38
-            self.damage_type = "magical"
-        elif spec_type == "poison":
-            self.color = (0, 150, 0)
-            self.proj_color = (100, 255, 100)
-            self.damage = 15
-            self.range = scaled(140)
-            self.cooldown_max = 30
-            self.damage_type = "magical"
-        elif spec_type == "lightning":
-            self.color = GOLD
-            self.proj_color = (255, 255, 0)
-            self.damage = 35
-            self.range = scaled(150)
-            self.cooldown_max = 60
-            self.damage_type = "magical"
+        if self.tower_type == "cannon":
+            if spec_type == "sniper":
+                self.color = (255, 220, 90)
+                self.damage = 150
+                self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
+                self.cooldown_max = 78
+                self.splash_radius = 0
+                self.splash_damage_multiplier = 0
+            elif spec_type == "scatter":
+                self.color = (255, 145, 70)
+                self.damage = 70
+                self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
+                self.cooldown_max = 60
+                self.splash_radius = scaled(115)
+                self.splash_damage_multiplier = 0.75
+            elif spec_type == "gatling":
+                self.color = (120, 230, 140)
+                self.damage = 44
+                self.range = CELL_SIZE * 16
+                self.cooldown_max = 16
+                self.splash_radius = 0
+                self.splash_damage_multiplier = 0
+            self.cooldown = min(self.cooldown, self.cooldown_max)
+            self.damage_type = "physical"
+            return
 
     def take_damage(self, damage):
         return
@@ -1350,18 +1324,19 @@ class Tower:
                     target.take_damage(self.damage, self.damage_type, self.tower_type)
                 
                 if self.tower_type == "cannon" and not isinstance(target, RaiderCamp):
-                    splash_radius = scaled(60)
-                    splash_damage = int(self.damage * 0.5)
-                    for e in enemies:
-                        if e is not target and e.alive:
-                            d = math.hypot(e.pos[0] - target.pos[0], e.pos[1] - target.pos[1])
-                            if d <= splash_radius:
-                                e.take_damage(splash_damage, self.damage_type, self.tower_type)
-                    for r in raiders:
-                        if r is not target and r.alive:
-                            d = math.hypot(r.pos[0] - target.pos[0], r.pos[1] - target.pos[1])
-                            if d <= splash_radius:
-                                r.take_damage(splash_damage, self.damage_type, self.tower_type)
+                    splash_radius = getattr(self, "splash_radius", scaled(60))
+                    splash_damage = int(self.damage * getattr(self, "splash_damage_multiplier", 0.5))
+                    if splash_radius > 0 and splash_damage > 0:
+                        for e in enemies:
+                            if e is not target and e.alive:
+                                d = math.hypot(e.pos[0] - target.pos[0], e.pos[1] - target.pos[1])
+                                if d <= splash_radius:
+                                    e.take_damage(splash_damage, self.damage_type, self.tower_type)
+                        for r in raiders:
+                            if r is not target and r.alive:
+                                d = math.hypot(r.pos[0] - target.pos[0], r.pos[1] - target.pos[1])
+                                if d <= splash_radius:
+                                    r.take_damage(splash_damage, self.damage_type, self.tower_type)
                 
                 if self.specialization == "ice" and not isinstance(target, RaiderCamp):
                     target.slow_timer = 60
@@ -1393,18 +1368,19 @@ class Tower:
             tx, ty = target.pos
             target.take_damage(self.damage, self.damage_type, self.tower_type)
 
-            splash_radius = scaled(60)
-            splash_damage = int(self.damage * 0.5)
-            for e in enemies:
-                if e is not target and e.alive:
-                    d = math.hypot(e.pos[0] - tx, e.pos[1] - ty)
-                    if d <= splash_radius:
-                        e.take_damage(splash_damage, self.damage_type, self.tower_type)
-            for r in raiders:
-                if r is not target and r.alive:
-                    d = math.hypot(r.pos[0] - tx, r.pos[1] - ty)
-                    if d <= splash_radius:
-                        r.take_damage(splash_damage, self.damage_type, self.tower_type)
+            splash_radius = getattr(self, "splash_radius", scaled(60))
+            splash_damage = int(self.damage * getattr(self, "splash_damage_multiplier", 0.5))
+            if splash_radius > 0 and splash_damage > 0:
+                for e in enemies:
+                    if e is not target and e.alive:
+                        d = math.hypot(e.pos[0] - tx, e.pos[1] - ty)
+                        if d <= splash_radius:
+                            e.take_damage(splash_damage, self.damage_type, self.tower_type)
+                for r in raiders:
+                    if r is not target and r.alive:
+                        d = math.hypot(r.pos[0] - tx, r.pos[1] - ty)
+                        if d <= splash_radius:
+                            r.take_damage(splash_damage, self.damage_type, self.tower_type)
 
         self.laser_beams.append([self.x, self.y, tx, ty, 8])
 
@@ -1503,14 +1479,7 @@ class Tower:
             pygame.draw.line(surface, (255, 245, 170), (x1, y1), (x2, y2), width)
             pygame.draw.line(surface, RED, (x1, y1), (x2, y2), max(1, width // 2))
 
-        if self.tower_type in LIGHT_TOWER_TYPES:
-            return
-
-        bar_width = scaled(40)
-        bar_y = self.y - scaled(40)
-        pygame.draw.rect(surface, RED, (self.x - bar_width//2, bar_y, bar_width, scaled(6)))
-        hp_ratio = self.hp / self.max_hp
-        pygame.draw.rect(surface, YELLOW, (self.x - bar_width//2, bar_y, int(bar_width * hp_ratio), scaled(6)))
+        return
 
 
 class OreVein:
@@ -1755,8 +1724,7 @@ class Game:
         self.selected_tower_type = None
         self.selected_tower = None
         self.selected_hive = None
-        self.last_tower_click_cell = None
-        self.last_tower_click_time = 0
+        self.action_cooldowns = {action: 0 for action in ACTION_COOLDOWN_FRAMES}
         self.build_direction_index = 1
         self.victory = False
         self.defeat = False
@@ -1765,23 +1733,14 @@ class Game:
         self.bonuses = self.generate_bonuses()
         self.notification_text = ""
         self.notification_timer = 0
-        self.radar_mode = False
         
         self.first_wave_started = False
         
-        self.mage_upgrade_pending = False
-        self.mage_to_upgrade = None
-        
-        self.radar_animation_active = False
-        self.radar_animation_center = None
-        self.radar_animation_timer = 0
-        self.radar_animation_duration = 60
-        self.radar_animation_radius = 0
-        self.radar_animation_max_radius = 3 * CELL_SIZE
+        self.tower_specialization_pending = False
+        self.tower_to_specialize = None
         self.lit_cells = self.get_castle_light_zone() | set(GENERATOR_CELLS)
         self.shadow_cells = set()
         self.revealed_cells = set(self.lit_cells)
-        self.scout_count = 0
         
         self.raider_spawn_timer = 0
         self.raider_spawn_cooldown = 1800
@@ -1791,11 +1750,9 @@ class Game:
         self.wave_delay = 600
         self.wave_delay_timer = 0
         self.wave_delay_active = False
-        self.waves_completed = 0
         
         self.total_waves = 999
 
-        self.waves = self.generate_waves()
         self.spawn_queue = []
         self.zoom = START_ZOOM
         self.camera_x = HQ_CENTER_X - VIEWPORT_WIDTH / self.zoom / 2
@@ -1824,12 +1781,6 @@ class Game:
         return (
             self.camera_x + (pos[0] - VIEWPORT_X) / self.zoom,
             self.camera_y + (pos[1] - VIEWPORT_Y) / self.zoom
-        )
-
-    def world_to_screen(self, pos):
-        return (
-            VIEWPORT_X + (pos[0] - self.camera_x) * self.zoom,
-            VIEWPORT_Y + (pos[1] - self.camera_y) * self.zoom
         )
 
     def zoom_at(self, screen_pos, factor):
@@ -1873,53 +1824,6 @@ class Game:
         if dx or dy:
             self.pan_camera(dx, dy)
 
-    def generate_veins(self):
-        all_vein_cells = set()
-        for _ in range(10):
-            size = random.choices([1,2,3,4], weights=[40,30,20,10])[0]
-            attempts = 0
-            while attempts < 100:
-                base = (random.randint(1, GRID_WIDTH-2), random.randint(1, GRID_HEIGHT-2))
-                if is_any_path_cell(base) or is_hq_cell(base):
-                    attempts += 1
-                    continue
-                too_close = False
-                for vc in all_vein_cells:
-                    if abs(base[0]-vc[0]) < 2 and abs(base[1]-vc[1]) < 2:
-                        too_close = True
-                        break
-                if too_close:
-                    attempts += 1
-                    continue
-                vein_cells = [base]
-                current = base
-                for _ in range(size-1):
-                    neighbors = []
-                    for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
-                        nx, ny = current[0]+dx, current[1]+dy
-                        if 0 <= nx < GRID_WIDTH and 0 <= ny < GRID_HEIGHT:
-                            if (nx,ny) not in vein_cells and not is_any_path_cell((nx,ny)) and not is_hq_cell((nx,ny)):
-                                ok = True
-                                for vc in all_vein_cells:
-                                    if abs(nx-vc[0]) < 2 and abs(ny-vc[1]) < 2:
-                                        ok = False
-                                        break
-                                if ok:
-                                    neighbors.append((nx,ny))
-                    if not neighbors:
-                        break
-                    chosen = random.choice(neighbors)
-                    vein_cells.append(chosen)
-                    current = chosen
-                if len(vein_cells) == size:
-                    vein = OreVein(vein_cells)
-                    self.veins.append(vein)
-                    for cell in vein_cells:
-                        all_vein_cells.add(cell)
-                    break
-                attempts += 1
-        self.update_discovered_veins()
-
     def get_castle_light_zone(self):
         margin = BASE_CASTLE_LIGHT_MARGIN + max(0, self.hq.level - 1)
         cells = set()
@@ -1958,6 +1862,20 @@ class Game:
     def notify(self, text, duration=120):
         self.notification_text = text
         self.notification_timer = duration
+
+    def clear_selection(self):
+        self.selected_tower_type = None
+        self.selected_tower = None
+        self.selected_hive = None
+
+    def select_or_toggle_tower(self, tower):
+        if self.selected_tower is tower:
+            self.clear_selection()
+            return False
+        self.selected_tower = tower
+        self.selected_tower_type = None
+        self.selected_hive = None
+        return True
 
     def built_light_tower_count(self):
         return sum(
@@ -2048,6 +1966,8 @@ class Game:
             enemy.lamp_disable_cooldown = DIMMER_LAMP_DISABLE_COOLDOWN
 
     def apply_light_damage(self):
+        if LIGHT_DAMAGE_PER_SECOND <= 0:
+            return
         damage = LIGHT_DAMAGE_PER_SECOND / 60
         for enemy in self.enemies:
             if enemy.alive and self.is_position_lit(enemy.pos):
@@ -2211,26 +2131,8 @@ class Game:
             if any(cell in self.lit_cells for cell in vein.cells):
                 vein.discovered = True
 
-    def reveal_cells_around(self, center_cell, radius):
-        cx, cy = center_cell
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                cell = (cx + dx, cy + dy)
-                if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
-                    if abs(dx) + abs(dy) <= radius:
-                        self.revealed_cells.add(cell)
-        if hasattr(self, "veins"):
-            self.update_discovered_veins()
-
     def is_revealed(self, cell):
         return cell in self.revealed_cells or self.is_lit(cell)
-
-    def get_active_miners(self):
-        return [
-            tower for tower in self.towers
-            if (tower.tower_type == "miner" and tower.hp > 0 and tower.mining
-                and not tower.attack_mode and tower.mode_transition_timer == 0)
-        ]
 
     def can_pay_shot(self, tower):
         cost = TOWER_ORE_COST.get(tower.tower_type, 1)
@@ -2244,60 +2146,6 @@ class Game:
             self.ore -= cost
             return True
         return False
-
-    def get_scout_cost(self):
-        return BASE_SCOUT_COST + self.scout_count * SCOUT_COST_STEP
-
-    def reveal_area(self, center_cell):
-        cost = self.get_scout_cost()
-        if self.money >= cost:
-            self.money -= cost
-            self.scout_count += 1
-            self.radar_animation_center = None
-            self.radar_animation_active = False
-            self.radar_animation_timer = 0
-            self.radar_animation_radius = 0
-            self.radar_mode = False
-            self.reveal_cells_around(center_cell, REVEAL_RADIUS_CELLS)
-
-    def draw_revealed_cells_overlay(self, surface):
-        return
-
-    def update_radar_animation(self):
-        if not self.radar_animation_active:
-            return
-        
-        self.radar_animation_timer += 1
-        progress = self.radar_animation_timer / self.radar_animation_duration
-        self.radar_animation_radius = int(self.radar_animation_max_radius * progress)
-        
-        if self.radar_animation_center:
-            cx, cy = self.radar_animation_center
-            center_cell = ((cx - FIELD_OFFSET_X) // CELL_SIZE, (cy - FIELD_OFFSET_Y) // CELL_SIZE)
-            
-            for dx in range(-1, 2):
-                for dy in range(-1, 2):
-                    cell_x = center_cell[0] + dx
-                    cell_y = center_cell[1] + dy
-                    if 0 <= cell_x < GRID_WIDTH and 0 <= cell_y < GRID_HEIGHT:
-                        cell_px = FIELD_OFFSET_X + cell_x * CELL_SIZE + CELL_SIZE // 2
-                        cell_py = FIELD_OFFSET_Y + cell_y * CELL_SIZE + CELL_SIZE // 2
-                        dist = math.hypot(cell_px - cx, cell_py - cy)
-                        if dist <= self.radar_animation_radius:
-                            self.revealed_cells.add((cell_x, cell_y))
-                            vein = self.get_vein_at((cell_x, cell_y))
-                            if vein:
-                                vein.discovered = True
-        
-        if self.radar_animation_timer >= self.radar_animation_duration:
-            self.radar_animation_active = False
-            self.radar_animation_center = None
-
-    def draw_radar_animation(self, surface):
-        return
-
-    def generate_waves(self):
-        return []
 
     def hive_spawn_multiplier(self):
         destroyed = sum(1 for hive in self.hives if not hive.is_alive)
@@ -2340,6 +2188,18 @@ class Game:
         enemy.reward = int(enemy.reward * reward_bonus)
         return enemy
 
+    def tick_action_cooldowns(self):
+        for action in self.action_cooldowns:
+            if self.action_cooldowns[action] > 0:
+                self.action_cooldowns[action] -= 1
+
+    def can_use_action(self, action):
+        return self.action_cooldowns.get(action, 0) <= 0
+
+    def start_action_cooldown(self, action):
+        if action in ACTION_COOLDOWN_FRAMES:
+            self.action_cooldowns[action] = ACTION_COOLDOWN_FRAMES[action]
+
     def start_wave(self, early=False):
         if not self.wave_active and not self.wave_delay_active and any(hive.is_alive for hive in self.hives):
             if early and self.first_wave_started:
@@ -2361,10 +2221,11 @@ class Game:
             self.wave_delay_active = self.wave_delay > 0
             self.wave_delay_timer = 0
             self.wave_interval_timer = 0
-            self.notify(f"Wave {self.wave} started")
 
     def build_tower(self, tower_type, cell):
         if tower_type not in BUILDABLE_TOWER_TYPES:
+            return False
+        if not self.can_use_action("build"):
             return False
         if self.money < TOWER_COST[tower_type]:
             self.notify("Need more light")
@@ -2380,15 +2241,16 @@ class Game:
             tower.direction_index = self.build_direction_index
         self.towers.append(tower)
         self.money -= TOWER_COST[tower_type]
+        self.start_action_cooldown("build")
         self.update_lighting()
-        self.notify("Light tower built")
+        self.notify(f"{TOWER_DISPLAY_NAMES.get(tower_type, tower_type)} built")
         return True
 
     def upgrade_tower(self):
         if self.selected_tower and self.selected_tower.hp > 0:
-            if self.selected_tower.tower_type == "mage" and self.selected_tower.level == 1:
-                self.mage_upgrade_pending = True
-                self.mage_to_upgrade = self.selected_tower
+            if self.selected_tower.tower_type == "cannon" and self.selected_tower.level == 1 and not self.selected_tower.specialization:
+                self.tower_specialization_pending = True
+                self.tower_to_specialize = self.selected_tower
                 return False
             
             cost = TOWER_UPGRADE_COST.get(self.selected_tower.tower_type)
@@ -2401,24 +2263,26 @@ class Game:
                     return True
         return False
 
-    def apply_mage_specialization(self, spec_type):
-        if self.mage_to_upgrade and self.mage_to_upgrade.hp > 0:
-            cost = TOWER_UPGRADE_COST.get("mage")
+    def apply_tower_specialization(self, spec_type):
+        if self.tower_to_specialize and self.tower_to_specialize.hp > 0:
+            cost = TOWER_UPGRADE_COST.get(self.tower_to_specialize.tower_type)
             if cost is None:
-                self.mage_upgrade_pending = False
-                self.mage_to_upgrade = None
+                self.tower_specialization_pending = False
+                self.tower_to_specialize = None
                 return False
             if self.money >= cost:
                 self.money -= cost
-                self.mage_to_upgrade.level += 1
-                self.mage_to_upgrade.apply_specialization(spec_type)
-                self.mage_to_upgrade.total_investment += cost
-                self.mage_upgrade_pending = False
-                self.mage_to_upgrade = None
+                self.tower_to_specialize.level += 1
+                self.tower_to_specialize.apply_specialization(spec_type)
+                self.tower_to_specialize.total_investment += cost
+                self.tower_specialization_pending = False
+                self.tower_to_specialize = None
                 return True
         return False
 
     def sell_tower(self, cell):
+        if not self.can_use_action("sell"):
+            return False
         for t in self.towers:
             if t.cell == cell:
                 if getattr(t, "fixed", False):
@@ -2431,90 +2295,124 @@ class Game:
                 if t == self.selected_tower:
                     self.selected_tower = None
                 self.towers.remove(t)
+                self.start_action_cooldown("sell")
                 self.update_lighting()
                 return True
         return False
 
-    def toggle_miner_mode(self):
-        if self.selected_tower and self.selected_tower.tower_type == "miner" and self.selected_tower.hp > 0:
-            miner = self.selected_tower
-            if miner.mode_transition_timer > 0:
-                return False
-            miner.mode_transition_timer = miner.mode_transition_max
-            return True
+    def sell_selected_tower(self):
+        if self.selected_tower and self.selected_tower.hp > 0:
+            return self.sell_tower(self.selected_tower.cell)
         return False
 
     def rotate_selected_tower(self):
+        if not self.can_use_action("rotate"):
+            return False
         if self.selected_tower and self.selected_tower.rotate():
+            self.start_action_cooldown("rotate")
             self.update_lighting()
             return True
         if self.selected_tower_type in ROTATABLE_LIGHT_TYPES:
             self.build_direction_index = (self.build_direction_index + 1) % len(DIRECTIONS)
+            self.start_action_cooldown("rotate")
             return True
         return False
 
-    def get_right_panel_buttons(self):
+    def get_tower_display_name(self, tower_type):
+        return TOWER_DISPLAY_NAMES.get(tower_type, tower_type.capitalize())
+
+    def get_left_build_buttons(self):
         buttons = []
+        btn_width = SIDE_PANEL_WIDTH - scaled(40)
+        btn_height = scaled(64)
+        btn_gap = scaled(14)
+        left_x = scaled(20)
+        start_y = SCREEN_HEIGHT - scaled(40) - len(BUILDABLE_TOWER_TYPES) * btn_height - (len(BUILDABLE_TOWER_TYPES) - 1) * btn_gap
         for tower_type in BUILDABLE_TOWER_TYPES:
             buttons.append({
                 "action": f"build:{tower_type}",
-                "title": {"lamp": "Lamp", "beacon": "Beacon"}.get(tower_type, tower_type.capitalize()),
-                "subtitle": f"${TOWER_COST[tower_type]}",
-                "enabled": True,
+                "title": self.get_tower_display_name(tower_type),
+                "cost": TOWER_COST[tower_type],
+                "enabled": (
+                    self.money >= TOWER_COST[tower_type]
+                    and self.built_light_tower_count() < self.hq.scout_limit
+                    and self.can_use_action("build")
+                ),
                 "selected": self.selected_tower_type == tower_type,
+                "rect": pygame.Rect(left_x, start_y + len(buttons) * (btn_height + btn_gap), btn_width, btn_height),
             })
+        return buttons
 
+    def get_right_panel_buttons(self):
+        buttons = []
         tower_cost = None
         if self.selected_tower:
             tower_cost = TOWER_UPGRADE_COST.get(self.selected_tower.tower_type)
-        buttons.append({
-            "action": "upgrade_tower",
-            "title": "Upgrade",
-            "subtitle": f"${tower_cost}" if tower_cost is not None else "Select tower",
-            "enabled": (
-                self.selected_tower is not None
-                and tower_cost is not None
-                and self.selected_tower.level < 4
-                and self.money >= tower_cost
-            ),
-            "selected": False,
-        })
 
-        gen_cost = self.hq.upgrade_cost()
-        buttons.append({
-            "action": "upgrade_generator",
-            "title": "Generator",
-            "subtitle": f"${gen_cost}" if gen_cost is not None else "MAX",
-            "enabled": gen_cost is not None and self.money >= gen_cost,
-            "selected": False,
-        })
+            if self.selected_tower.tower_type == "cannon" and self.selected_tower.broken:
+                buttons.append({
+                    "action": "repair_cannon",
+                    "title": "Repair",
+                    "cost": REPAIR_CANNON_COST,
+                    "enabled": self.money >= REPAIR_CANNON_COST,
+                    "selected": False,
+                })
 
-        if self.selected_tower and self.selected_tower.tower_type == "cannon" and self.selected_tower.broken:
             buttons.append({
-                "action": "repair_cannon",
-                "title": "Repair Cannon",
-                "subtitle": f"${REPAIR_CANNON_COST}",
-                "enabled": self.money >= REPAIR_CANNON_COST,
+                "action": "upgrade_tower",
+                "title": "Upgrade",
+                "cost": tower_cost,
+                "enabled": (
+                    tower_cost is not None
+                    and self.selected_tower.level < 4
+                    and self.money >= tower_cost
+                ),
                 "selected": False,
             })
 
-        buttons.append({
-            "action": "artillery",
-            "title": "Artillery",
-            "subtitle": f"${ARTILLERY_COST}",
-            "enabled": self.can_artillery_strike(),
-            "selected": self.selected_hive is not None,
-        })
+            if self.selected_tower.tower_type in ROTATABLE_LIGHT_TYPES:
+                buttons.append({
+                    "action": "rotate_tower",
+                    "title": "Rotate",
+                    "cost": None,
+                    "enabled": self.can_use_action("rotate"),
+                    "selected": False,
+                })
+
+            buttons.append({
+                "action": "sell_selected",
+                "title": "Remove",
+                "cost": None,
+                "enabled": not getattr(self.selected_tower, "fixed", False) and self.can_use_action("sell"),
+                "selected": False,
+                "danger": True,
+            })
+        elif self.selected_hive:
+            buttons.append({
+                "action": "artillery",
+                "title": "Artillery",
+                "cost": ARTILLERY_COST,
+                "enabled": self.can_artillery_strike(),
+                "selected": self.selected_hive is not None,
+            })
+        else:
+            gen_cost = self.hq.upgrade_cost()
+            buttons.append({
+                "action": "upgrade_generator",
+                "title": "Generator",
+                "cost": gen_cost,
+                "enabled": gen_cost is not None and self.money >= gen_cost,
+                "selected": False,
+            })
         return buttons
 
     def get_right_panel_layout(self):
-        right_x = SCREEN_WIDTH - SIDE_PANEL_WIDTH + scaled(15)
-        btn_width = SIDE_PANEL_WIDTH - scaled(30)
-        start_y = scaled(30)
-        btn_gap = scaled(15)
+        right_x = SCREEN_WIDTH - SIDE_PANEL_WIDTH + scaled(20)
+        btn_width = SIDE_PANEL_WIDTH - scaled(40)
+        btn_height = scaled(64)
+        btn_gap = scaled(14)
         buttons = self.get_right_panel_buttons()
-        max_btn_height = (SCREEN_HEIGHT - start_y * 2 - btn_gap * (len(buttons) - 1)) // max(1, len(buttons))
-        btn_height = max(54, min(92, max_btn_height))
+        start_y = SCREEN_HEIGHT - scaled(40) - len(buttons) * btn_height - max(0, len(buttons) - 1) * btn_gap
         return buttons, right_x, btn_width, start_y, btn_gap, btn_height
 
     def run_right_panel_action(self, action):
@@ -2525,6 +2423,11 @@ class Game:
             self.selected_hive = None
         elif action == "upgrade_tower":
             self.upgrade_tower()
+        elif action == "rotate_tower":
+            self.rotate_selected_tower()
+        elif action == "sell_selected":
+            if self.sell_selected_tower():
+                self.notify("Tower sold")
         elif action == "upgrade_generator":
             self.upgrade_generator()
         elif action == "repair_cannon":
@@ -2542,20 +2445,163 @@ class Game:
                 return True
         return False
 
+    def handle_left_panel_click(self, pos):
+        for button in self.get_left_build_buttons():
+            if button["rect"].collidepoint(pos):
+                if button["enabled"]:
+                    self.selected_tower_type = button["action"].split(":", 1)[1]
+                    self.selected_tower = None
+                    self.selected_hive = None
+                return True
+        return False
+
+    def draw_energy_icon(self, surface, center, size):
+        x, y = center
+        points = [
+            (x + size * 0.05, y - size * 0.50),
+            (x - size * 0.32, y + size * 0.08),
+            (x - size * 0.04, y + size * 0.08),
+            (x - size * 0.18, y + size * 0.50),
+            (x + size * 0.34, y - size * 0.16),
+            (x + size * 0.05, y - size * 0.16),
+        ]
+        pygame.draw.polygon(surface, GOLD, points)
+        pygame.draw.polygon(surface, BLACK, points, max(1, scaled(2)))
+
+    def draw_stat_icon(self, surface, icon_type, center, size):
+        x, y = center
+        if icon_type == "heart":
+            pygame.draw.circle(surface, (255, 95, 105), (int(x - size * 0.22), int(y - size * 0.15)), int(size * 0.22))
+            pygame.draw.circle(surface, (255, 95, 105), (int(x + size * 0.22), int(y - size * 0.15)), int(size * 0.22))
+            pygame.draw.polygon(surface, (255, 95, 105), [
+                (x - size * 0.45, y - size * 0.05),
+                (x + size * 0.45, y - size * 0.05),
+                (x, y + size * 0.50),
+            ])
+        elif icon_type == "energy":
+            self.draw_energy_icon(surface, center, size)
+        elif icon_type == "tower":
+            rect = pygame.Rect(0, 0, size * 0.58, size * 0.68)
+            rect.center = center
+            pygame.draw.rect(surface, (130, 170, 180), rect)
+            pygame.draw.rect(surface, BLACK, rect, max(1, scaled(2)))
+            for i in range(3):
+                tooth = pygame.Rect(rect.x + i * rect.w / 3, rect.y - size * 0.16, rect.w / 4, size * 0.18)
+                pygame.draw.rect(surface, (130, 170, 180), tooth)
+                pygame.draw.rect(surface, BLACK, tooth, max(1, scaled(1)))
+        elif icon_type == "target":
+            pygame.draw.circle(surface, (255, 95, 95), (int(x), int(y)), int(size * 0.42), max(2, scaled(4)))
+            pygame.draw.circle(surface, WHITE, (int(x), int(y)), int(size * 0.24), max(2, scaled(3)))
+            pygame.draw.circle(surface, (255, 95, 95), (int(x), int(y)), int(size * 0.08))
+        elif icon_type == "wave":
+            pygame.draw.rect(surface, (120, 170, 255), (x - size * 0.32, y - size * 0.30, size * 0.14, size * 0.62))
+            pygame.draw.polygon(surface, (120, 170, 255), [
+                (x - size * 0.18, y - size * 0.30),
+                (x + size * 0.36, y - size * 0.16),
+                (x - size * 0.18, y + size * 0.02),
+            ])
+
+    def draw_cost(self, surface, amount, pos, text_color=BLACK):
+        if amount is None:
+            return
+        x, y = pos
+        self.draw_energy_icon(surface, (x + scaled(14), y + scaled(16)), scaled(26))
+        text = font_small.render(str(int(amount)), True, text_color)
+        surface.blit(text, (x + scaled(34), y - scaled(2)))
+
+    def draw_panel_button(self, surface, rect, title, cost=None, enabled=True, selected=False, danger=False):
+        if selected:
+            color = (86, 255, 82)
+        elif danger:
+            color = (255, 95, 95) if enabled else (120, 70, 70)
+        elif enabled:
+            color = (92, 255, 92)
+        else:
+            color = (190, 190, 190)
+        pygame.draw.rect(surface, color, rect, border_radius=scaled(4))
+        pygame.draw.rect(surface, BLACK, rect, max(1, scaled(2)), border_radius=scaled(4))
+        title_text = font_small.render(title, True, BLACK)
+        surface.blit(title_text, (rect.x + scaled(10), rect.y + (rect.h - title_text.get_height()) // 2))
+        if cost is not None:
+            cost_x = rect.right - scaled(82)
+            self.draw_cost(surface, cost, (cost_x, rect.y + (rect.h - scaled(34)) // 2), BLACK)
+
     def draw_right_panel_buttons(self, surface):
         buttons, right_x, btn_width, start_y, btn_gap, btn_height = self.get_right_panel_layout()
         for index, button in enumerate(buttons):
             rect = pygame.Rect(right_x, start_y + index * (btn_height + btn_gap), btn_width, btn_height)
-            if button["selected"]:
-                color = GOLD
-            elif button["enabled"]:
-                color = GREEN
-            else:
-                color = LIGHT_GRAY
-            pygame.draw.rect(surface, color, rect)
-            pygame.draw.rect(surface, BLACK, rect, 2)
-            surface.blit(font_small.render(button["title"], True, BLACK), (rect.x + 8, rect.y + 8))
-            surface.blit(font_small.render(button["subtitle"], True, BLACK), (rect.x + 8, rect.y + btn_height // 2))
+            self.draw_panel_button(
+                surface,
+                rect,
+                button["title"],
+                button.get("cost"),
+                button["enabled"],
+                button["selected"],
+                button.get("danger", False),
+            )
+
+    def draw_left_panel(self, surface):
+        x_indent = scaled(30)
+        icon_x = x_indent + scaled(18)
+        text_x = x_indent + scaled(62)
+        y = scaled(70)
+        row_gap = scaled(72)
+        total_hives = len(self.hives)
+        alive_hives = sum(1 for hive in self.hives if hive.is_alive)
+        stats = [
+            ("heart", f"{int(self.hq.hp)}/{int(self.hq.max_hp)}"),
+            ("energy", str(int(self.money))),
+            ("tower", f"{self.built_light_tower_count()}/{self.hq.scout_limit}"),
+            ("target", f"{total_hives - alive_hives}/{total_hives}"),
+            ("wave", f"G{self.hq.level}  W{self.wave}"),
+        ]
+        for icon_type, value in stats:
+            self.draw_stat_icon(surface, icon_type, (icon_x, y + scaled(20)), scaled(44))
+            rendered = font_medium.render(value, True, WHITE)
+            surface.blit(rendered, (text_x, y))
+            y += row_gap
+
+        build_label = font_small.render("Build", True, WHITE)
+        build_buttons = self.get_left_build_buttons()
+        if build_buttons:
+            label_y = build_buttons[0]["rect"].y - scaled(46)
+            surface.blit(build_label, (scaled(24), label_y))
+        for button in build_buttons:
+            self.draw_panel_button(
+                surface,
+                button["rect"],
+                button["title"],
+                button["cost"],
+                button["enabled"],
+                button["selected"],
+            )
+
+    def draw_right_panel_context(self, surface):
+        panel_x = SCREEN_WIDTH - SIDE_PANEL_WIDTH
+        content_x = panel_x + scaled(20)
+        info_y = SCREEN_HEIGHT - scaled(280)
+        if self.selected_tower and self.selected_tower.hp > 0:
+            name = self.get_tower_display_name(self.selected_tower.tower_type)
+            name_text = font_small.render(name, True, WHITE)
+            level_text = font_small.render(f"LVL {self.selected_tower.level}", True, WHITE)
+            surface.blit(name_text, (content_x, info_y))
+            surface.blit(level_text, (SCREEN_WIDTH - scaled(120), info_y))
+        elif self.selected_hive and self.selected_hive.is_alive:
+            surface.blit(font_small.render("Hive", True, WHITE), (content_x, info_y))
+            hp_text = font_small.render(f"{int(self.selected_hive.hp)}/{int(self.selected_hive.max_hp)}", True, WHITE)
+            surface.blit(hp_text, (content_x, info_y + scaled(42)))
+        else:
+            surface.blit(font_small.render(f"Generator LVL {self.hq.level}", True, WHITE), (content_x, info_y))
+            hp_text = font_small.render(f"{int(self.hq.hp)}/{int(self.hq.max_hp)}", True, WHITE)
+            surface.blit(hp_text, (content_x, info_y + scaled(42)))
+        self.draw_right_panel_buttons(surface)
+
+    def get_specialization_options(self):
+        return [
+            ("Sniper", (255, 220, 90), "sniper"),
+            ("Scatter", (255, 145, 70), "scatter"),
+            ("Gatling", (120, 230, 140), "gatling"),
+        ]
 
     def draw_notification(self, surface):
         if self.notification_timer <= 0 or not self.notification_text:
@@ -2710,13 +2756,12 @@ class Game:
 
         if self.notification_timer > 0:
             self.notification_timer -= 1
+        self.tick_action_cooldowns()
 
         self.hq.update(self)
         if self.hq.hp <= 0:
             self.defeat = True
             return
-
-        self.update_radar_animation()
 
         self.raider_spawn_timer += 1
         if self.raider_spawn_timer >= self.raider_spawn_cooldown:
@@ -2826,55 +2871,17 @@ class Game:
         if self.wave_active and not self.spawn_queue and len(self.enemies) == 0:
             self.wave_active = False
             self.wave += 1
-            self.waves_completed += 1
             self.wave_interval_timer = 0
             if all(not hive.is_alive for hive in self.hives):
                 self.victory = True
-            else:
-                self.post_wave_event()
-
-    def post_wave_event(self):
-        pass
 
     def draw_ui(self, surface):
         pygame.draw.rect(surface, PANEL_BG, (0, 0, SIDE_PANEL_WIDTH, SCREEN_HEIGHT))
         pygame.draw.rect(surface, PANEL_BG, (SCREEN_WIDTH - SIDE_PANEL_WIDTH, 0, SIDE_PANEL_WIDTH, SCREEN_HEIGHT))
+        self.draw_left_panel(surface)
+        self.draw_right_panel_context(surface)
 
-        y_offset = scaled(60)
-        x_indent = scaled(25)
-        line_gap = scaled(80)
-
-        texts = [
-            f"Light: {self.money}",
-            f"Wave: {self.wave}",
-            f"Generator: {self.hq.level}",
-            f"Towers: {self.built_light_tower_count()}/{self.hq.scout_limit}",
-            f"Hives: {sum(1 for hive in self.hives if hive.is_alive)}/3"
-        ]
-        colors = [GENERATOR_BLUE, WHITE, GENERATOR_BLUE, CYAN, PURPLE]
-        for txt, col in zip(texts, colors):
-            rendered = font_medium.render(txt, True, col)
-            surface.blit(rendered, (x_indent, y_offset))
-            y_offset += line_gap
-        
-        if not self.first_wave_started:
-            hint_txt = font_small.render("Wave begins automatically", True, CYAN)
-            surface.blit(hint_txt, (x_indent, y_offset))
-            y_offset += scaled(50)
-        elif self.wave_delay_active:
-            delay_seconds = (self.wave_delay - self.wave_delay_timer) / 60
-            delay_txt = font_small.render(f"Enemies in: {delay_seconds:.1f}s", True, RED)
-            surface.blit(delay_txt, (x_indent, y_offset))
-            y_offset += scaled(50)
-        elif not self.wave_active and self.wave <= self.total_waves:
-            interval_seconds = (self.wave_interval - self.wave_interval_timer) / 60
-            next_txt = font_small.render(f"Next wave: {interval_seconds:.0f}s", True, CYAN)
-            surface.blit(next_txt, (x_indent, y_offset))
-            y_offset += scaled(50)
-
-        self.draw_right_panel_buttons(surface)
-
-        if self.mage_upgrade_pending:
+        if self.tower_specialization_pending:
             overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 150))
             surface.blit(overlay, (0, 0))
@@ -2887,15 +2894,10 @@ class Game:
             pygame.draw.rect(surface, PANEL_BG, (menu_x, menu_y, menu_w, menu_h))
             pygame.draw.rect(surface, GOLD, (menu_x, menu_y, menu_w, menu_h), scaled(3))
             
-            title = font_medium.render("Choose Mage Specialization", True, WHITE)
+            title = font_medium.render("Choose Cannon Specialization", True, WHITE)
             surface.blit(title, (menu_x + (menu_w - title.get_width()) // 2, menu_y + scaled(20)))
             
-            specs = [
-                ("Ice", CYAN, "ice"),
-                ("Fire", (255, 100, 0), "fire"),
-                ("Poison", (100, 255, 100), "poison"),
-                ("Lightning", GOLD, "lightning")
-            ]
+            specs = self.get_specialization_options()
             
             btn_w = scaled(160)
             btn_h = scaled(60)
@@ -2982,20 +2984,20 @@ while running:
             if event.button != 1:
                 continue
             
-            if game.mage_upgrade_pending:
+            if game.tower_specialization_pending:
                 menu_w = scaled(400)
                 menu_h = scaled(300)
                 menu_x = (SCREEN_WIDTH - menu_w) // 2
                 menu_y = (SCREEN_HEIGHT - menu_h) // 2
                 
-                specs = ["ice", "fire", "poison", "lightning"]
+                specs = game.get_specialization_options()
                 btn_w = scaled(160)
                 btn_h = scaled(60)
                 gap = scaled(20)
                 start_x = menu_x + (menu_w - 2 * btn_w - gap) // 2
                 start_y_menu = menu_y + scaled(100)
                 
-                for i, spec in enumerate(specs):
+                for i, (_, _, spec) in enumerate(specs):
                     row = i // 2
                     col = i % 2
                     bx = start_x + col * (btn_w + gap)
@@ -3003,14 +3005,14 @@ while running:
                     
                     rect = pygame.Rect(bx, by, btn_w, btn_h)
                     if rect.collidepoint(pos):
-                        game.apply_mage_specialization(spec)
+                        game.apply_tower_specialization(spec)
                         break
                 continue
             
             if pos[0] >= SCREEN_WIDTH - SIDE_PANEL_WIDTH:
                 game.handle_right_panel_click(pos)
             elif pos[0] < SIDE_PANEL_WIDTH:
-                pass
+                game.handle_left_panel_click(pos)
             elif game.is_in_viewport(pos):
                 cell = cell_from_pos(game.screen_to_world(pos))
                 if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
@@ -3035,21 +3037,7 @@ while running:
 
                     for t in game.towers:
                         if t.cell == cell and t.hp > 0:
-                            now = pygame.time.get_ticks()
-                            is_double_click = (
-                                game.selected_tower is t
-                                and game.last_tower_click_cell == cell
-                                and now - game.last_tower_click_time <= 360
-                            )
-                            game.selected_tower = t
-                            game.selected_tower_type = None
-                            game.selected_hive = None
-                            game.last_tower_click_cell = cell
-                            game.last_tower_click_time = now
-                            if is_double_click:
-                                game.upgrade_tower()
-                                game.last_tower_click_cell = None
-                                game.last_tower_click_time = 0
+                            game.select_or_toggle_tower(t)
                             break
                     else:
                         if game.selected_tower_type:
