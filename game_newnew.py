@@ -29,7 +29,7 @@ VIEWPORT_Y = (SCREEN_HEIGHT - VIEWPORT_SIZE) // 2
 VIEWPORT_WIDTH = VIEWPORT_SIZE
 VIEWPORT_HEIGHT = VIEWPORT_SIZE
 
-GRID_WIDTH, GRID_HEIGHT = 40, 40
+GRID_WIDTH, GRID_HEIGHT = 41, 41
 CELL_SIZE = max(28, int(54 * SCALE))
 FIELD_OFFSET_X = 0
 FIELD_OFFSET_Y = 0
@@ -55,7 +55,7 @@ STARTING_ORE = 0
 CASTLE_GOLD_INCOME = 6
 CASTLE_GOLD_INTERVAL = 240
 GENERATOR_INCOME_BY_LEVEL = {1: 2.5, 2: 5, 3: 10, 4: 20}
-GENERATOR_TOWER_LIMIT_BY_LEVEL = {1: 6, 2: 12, 3: 18, 4: 24}
+GENERATOR_TOWER_LIMIT_BY_LEVEL = {1: 6, 2: 10, 3: 13, 4: 16}
 GENERATOR_UPGRADE_COST = {1: 300, 2: 600, 3: 1200}
 ARTILLERY_COST = 400
 REPAIR_CANNON_COST = 150
@@ -135,7 +135,7 @@ HQ_CELLS = {
 HQ_CENTER_X = FIELD_OFFSET_X + (HQ_MIN_X + HQ_SIZE_CELLS / 2) * CELL_SIZE
 HQ_CENTER_Y = FIELD_OFFSET_Y + (HQ_MIN_Y + HQ_SIZE_CELLS / 2) * CELL_SIZE
 GENERATOR_CELLS = set(HQ_CELLS)
-BASE_CASTLE_LIGHT_MARGIN = 3
+BASE_CASTLE_LIGHT_MARGIN = 5
 CASTLE_LIGHT_ZONE = {
     (x, y)
     for x in range(HQ_MIN_X - BASE_CASTLE_LIGHT_MARGIN, HQ_MIN_X + HQ_SIZE_CELLS + BASE_CASTLE_LIGHT_MARGIN)
@@ -186,14 +186,14 @@ LANES = {
         (19, 22), (19, 21), (19, 20)
     ],
     "south_east_a": [
-        (39, 25), (38, 25), (37, 25), (36, 25), (35, 25),
+        (40, 25), (39, 25), (38, 25), (37, 25), (36, 25), (35, 25),
         (34, 25), (33, 25), (32, 25), (32, 24), (32, 23),
         (32, 22), (32, 21), (31, 21), (30, 21), (29, 21),
         (28, 21), (27, 21), (26, 21), (25, 21), (24, 21),
         (24, 20), (23, 20), (22, 20), (21, 20), (20, 20)
     ],
     "south_east_b": [
-        (31, 39), (31, 38), (31, 37), (31, 36), (31, 35),
+        (31, 40), (31, 39), (31, 38), (31, 37), (31, 36), (31, 35),
         (31, 34), (30, 34), (29, 34), (28, 34), (27, 34),
         (26, 34), (26, 33), (26, 32), (26, 31), (26, 30),
         (26, 29), (25, 29), (24, 29), (23, 29), (22, 29),
@@ -1132,6 +1132,10 @@ class Tower:
                 self.max_hp = int(self.max_hp * 1.4)
                 self.hp = self.max_hp
                 self.respawn_cooldown = max(120, self.respawn_cooldown - 60)
+            elif self.tower_type == "cannon" and self.specialization:
+                self.apply_specialization(self.specialization)
+                self.max_hp = int(self.max_hp * 1.3)
+                self.hp = self.max_hp
             else:
                 self.damage = int(self.damage * 1.5)
                 self.range = int(self.range * 1.1)
@@ -1151,25 +1155,26 @@ class Tower:
     def apply_specialization(self, spec_type):
         self.specialization = spec_type
         if self.tower_type == "cannon":
+            level_bonus = 1 + max(0, self.level - 2) * 0.45
             if spec_type == "sniper":
                 self.color = (255, 220, 90)
-                self.damage = 150
+                self.damage = int(180 * level_bonus)
                 self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
-                self.cooldown_max = 78
+                self.cooldown_max = max(34, int(72 - max(0, self.level - 2) * 8))
                 self.splash_radius = 0
                 self.splash_damage_multiplier = 0
             elif spec_type == "scatter":
                 self.color = (255, 145, 70)
-                self.damage = 70
+                self.damage = int(95 * level_bonus)
                 self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
-                self.cooldown_max = 60
+                self.cooldown_max = max(28, int(48 - max(0, self.level - 2) * 6))
                 self.splash_radius = scaled(115)
                 self.splash_damage_multiplier = 0.75
             elif spec_type == "gatling":
                 self.color = (120, 230, 140)
-                self.damage = 44
-                self.range = CELL_SIZE * 16
-                self.cooldown_max = 16
+                self.damage = int(58 * level_bonus)
+                self.range = CELL_SIZE * (16 + max(0, self.level - 2) * 2)
+                self.cooldown_max = max(8, int(16 - max(0, self.level - 2) * 2))
                 self.splash_radius = 0
                 self.splash_damage_multiplier = 0
             self.cooldown = min(self.cooldown, self.cooldown_max)
@@ -2064,22 +2069,30 @@ class Game:
             return False
         return tower.cell in current_lit
 
-    def update_lighting(self):
+    def calculate_lit_cells(self, excluded_tower=None, update_power_flags=False):
         castle_light_zone = self.get_castle_light_zone()
         lit = set(castle_light_zone) | set(GENERATOR_CELLS)
-        for tower in self.towers:
-            if tower.tower_type in LIGHT_TOWER_TYPES:
-                tower.is_powered = False
+        if update_power_flags:
+            for tower in self.towers:
+                if tower.tower_type in LIGHT_TOWER_TYPES:
+                    tower.is_powered = False
         changed = True
         while changed:
             changed = False
             for tower in self.towers:
+                if tower is excluded_tower:
+                    continue
                 if self.light_source_has_power(tower, lit):
-                    tower.is_powered = True
+                    if update_power_flags:
+                        tower.is_powered = True
                     for cell in self.get_light_coverage(tower):
                         if cell not in lit:
                             lit.add(cell)
                             changed = True
+        return lit
+
+    def update_lighting(self):
+        lit = self.calculate_lit_cells(update_power_flags=True)
         self.shadow_cells = set()
         self.lit_cells = lit
         light_tower_cells = {
@@ -2265,6 +2278,17 @@ class Game:
 
     def apply_tower_specialization(self, spec_type):
         if self.tower_to_specialize and self.tower_to_specialize.hp > 0:
+            is_free_change = (
+                self.tower_to_specialize.tower_type == "cannon"
+                and self.tower_to_specialize.level >= 3
+                and self.tower_to_specialize.specialization is not None
+            )
+            if is_free_change:
+                self.tower_to_specialize.apply_specialization(spec_type)
+                self.tower_specialization_pending = False
+                self.tower_to_specialize = None
+                return True
+
             cost = TOWER_UPGRADE_COST.get(self.tower_to_specialize.tower_type)
             if cost is None:
                 self.tower_specialization_pending = False
@@ -2280,12 +2304,36 @@ class Game:
                 return True
         return False
 
+    def begin_tower_specialization_change(self):
+        if (
+            self.selected_tower
+            and self.selected_tower.tower_type == "cannon"
+            and self.selected_tower.level >= 3
+            and self.selected_tower.specialization
+        ):
+            self.tower_specialization_pending = True
+            self.tower_to_specialize = self.selected_tower
+            return True
+        return False
+
+    def can_sell_tower(self, tower):
+        if not tower or tower.hp <= 0:
+            return False
+        if getattr(tower, "fixed", False):
+            return False
+        if not self.can_use_action("sell"):
+            return False
+        return tower.cell in self.calculate_lit_cells(excluded_tower=tower)
+
     def sell_tower(self, cell):
         if not self.can_use_action("sell"):
             return False
         for t in self.towers:
             if t.cell == cell:
                 if getattr(t, "fixed", False):
+                    return False
+                if not self.can_sell_tower(t):
+                    self.notify("Tower must be lit to sell")
                     return False
                 if t.tower_type == "barracks" and t.allied_unit is not None:
                     t.allied_unit.alive = False
@@ -2379,11 +2427,24 @@ class Game:
                     "selected": False,
                 })
 
+            if (
+                self.selected_tower.tower_type == "cannon"
+                and self.selected_tower.level >= 3
+                and self.selected_tower.specialization
+            ):
+                buttons.append({
+                    "action": "change_specialization",
+                    "title": "Change",
+                    "cost": None,
+                    "enabled": True,
+                    "selected": False,
+                })
+
             buttons.append({
                 "action": "sell_selected",
                 "title": "Remove",
                 "cost": None,
-                "enabled": not getattr(self.selected_tower, "fixed", False) and self.can_use_action("sell"),
+                "enabled": self.can_sell_tower(self.selected_tower),
                 "selected": False,
                 "danger": True,
             })
@@ -2418,13 +2479,18 @@ class Game:
     def run_right_panel_action(self, action):
         if action.startswith("build:"):
             tower_type = action.split(":", 1)[1]
-            self.selected_tower_type = tower_type
-            self.selected_tower = None
-            self.selected_hive = None
+            if self.selected_tower_type == tower_type:
+                self.clear_selection()
+            else:
+                self.selected_tower_type = tower_type
+                self.selected_tower = None
+                self.selected_hive = None
         elif action == "upgrade_tower":
             self.upgrade_tower()
         elif action == "rotate_tower":
             self.rotate_selected_tower()
+        elif action == "change_specialization":
+            self.begin_tower_specialization_change()
         elif action == "sell_selected":
             if self.sell_selected_tower():
                 self.notify("Tower sold")
@@ -2449,9 +2515,13 @@ class Game:
         for button in self.get_left_build_buttons():
             if button["rect"].collidepoint(pos):
                 if button["enabled"]:
-                    self.selected_tower_type = button["action"].split(":", 1)[1]
-                    self.selected_tower = None
-                    self.selected_hive = None
+                    tower_type = button["action"].split(":", 1)[1]
+                    if self.selected_tower_type == tower_type:
+                        self.clear_selection()
+                    else:
+                        self.selected_tower_type = tower_type
+                        self.selected_tower = None
+                        self.selected_hive = None
                 return True
         return False
 
@@ -2553,7 +2623,6 @@ class Game:
             ("energy", str(int(self.money))),
             ("tower", f"{self.built_light_tower_count()}/{self.hq.scout_limit}"),
             ("target", f"{total_hives - alive_hives}/{total_hives}"),
-            ("wave", f"G{self.hq.level}  W{self.wave}"),
         ]
         for icon_type, value in stats:
             self.draw_stat_icon(surface, icon_type, (icon_x, y + scaled(20)), scaled(44))
@@ -2583,15 +2652,13 @@ class Game:
         if self.selected_tower and self.selected_tower.hp > 0:
             name = self.get_tower_display_name(self.selected_tower.tower_type)
             name_text = font_small.render(name, True, WHITE)
-            level_text = font_small.render(f"LVL {self.selected_tower.level}", True, WHITE)
             surface.blit(name_text, (content_x, info_y))
-            surface.blit(level_text, (SCREEN_WIDTH - scaled(120), info_y))
         elif self.selected_hive and self.selected_hive.is_alive:
             surface.blit(font_small.render("Hive", True, WHITE), (content_x, info_y))
             hp_text = font_small.render(f"{int(self.selected_hive.hp)}/{int(self.selected_hive.max_hp)}", True, WHITE)
             surface.blit(hp_text, (content_x, info_y + scaled(42)))
         else:
-            surface.blit(font_small.render(f"Generator LVL {self.hq.level}", True, WHITE), (content_x, info_y))
+            surface.blit(font_small.render("Generator", True, WHITE), (content_x, info_y))
             hp_text = font_small.render(f"{int(self.hq.hp)}/{int(self.hq.max_hp)}", True, WHITE)
             surface.blit(hp_text, (content_x, info_y + scaled(42)))
         self.draw_right_panel_buttons(surface)
@@ -2668,7 +2735,7 @@ class Game:
             preview_tower = self.selected_tower
         elif self.selected_tower_type in LIGHT_TOWER_TYPES and self.is_in_viewport(mouse_pos):
             cell = cell_from_pos(self.screen_to_world(mouse_pos))
-            if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT and self.is_lit(cell):
+            if self.can_place_light_building(cell):
                 preview_tower = self.make_preview_tower(self.selected_tower_type, cell)
 
         if not preview_tower:
