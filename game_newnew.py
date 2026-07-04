@@ -2,6 +2,7 @@ import pygame
 import math
 import random
 import sys
+import heapq
 
 pygame.init()
 
@@ -29,7 +30,64 @@ VIEWPORT_Y = (SCREEN_HEIGHT - VIEWPORT_SIZE) // 2
 VIEWPORT_WIDTH = VIEWPORT_SIZE
 VIEWPORT_HEIGHT = VIEWPORT_SIZE
 
-GRID_WIDTH, GRID_HEIGHT = 41, 41
+MAP_ROWS = [
+    "................................HHH....................",
+    "................................HHH....................",
+    "................................HHH....................",
+    ".................................#.....................",
+    ".......#########......########...#.....................",
+    ".......#.......#......#......#...######................",
+    ".......#.......#......#......#...#....#................",
+    ".......####....########......#...#....#................",
+    "..........#..................#####....##########.......",
+    "..........#....................................#.......",
+    "..........#...................................C#.......",
+    "..........#..................................###.......",
+    "..........#..................................#.........",
+    ".....$....#####..............................#.........",
+    "..............#..............................#.........",
+    "..............#..............................#.........",
+    "..............#..#######.....................#.........",
+    "..............#..#.....#..........########...#.........",
+    ".....#######..####.....#..........#......#...#.........",
+    ".....#C....#...........#...####...#......#####.........",
+    ".....#.....#...........#====~~=...#....................",
+    ".....#.....#..........~~~~~=~~==###....................",
+    ".....#.....#.........~~~~~~=~~~~~~.....................",
+    ".....###...#######...~~CC~~=~~CC~~.....................",
+    ".......#.........#..~~~CC~~=~~CC~~~.........$..........",
+    ".......#.........#..~~~~~=====~~~~~....................",
+    ".......#.........#..~~~~~=GGG=~~~~~....................",
+    ".......#.........#..~=====GGG=~~~~~....................",
+    ".......#.......#####==~~~=GGG=~~~~~.###############....",
+    ".......#.......#....~~~~~=====~~~~~.#.............#....",
+    ".......#.......#....~~~CC~~=~~CC~~~.#.............#....",
+    ".......#.......#.....~~CC~~=~~CC~~..###...........#....",
+    ".......#.......#####.~~~~~~=~~~~~~....#...........#....",
+    ".......#...........#..~~~~~====~~.....#.......#####....",
+    "...#####...........#....~~~=~~=.......#.......#........",
+    "...#...............#.......#..#########.......#........",
+    "...#...............#.......#..................#........",
+    "...###.............#.......#..................#........",
+    ".....#.............###.....#..................#........",
+    "HHH..#...............#.....#..................#........",
+    "HHH#####.............#.....#..................#........",
+    "HHH....#.............#.....######.............#####....",
+    ".......#......$......#..........#.................#....",
+    ".......#.............#..........#.................#....",
+    ".......#.............#..........#.................#....",
+    ".......#.............#..........#...............###....",
+    ".......#.............#..........#.....#####.....#......",
+    ".......###############..........#.....#...#.....#......",
+    "..............................###.....#...#.....#...HHH",
+    "..............................#.......#...##########HHH",
+    "..............................#.......#.............HHH",
+    "..............................#......C#................",
+    "..............................#########................",
+    ".......................................................",
+    ".......................................................",
+]
+GRID_WIDTH, GRID_HEIGHT = len(MAP_ROWS[0]), len(MAP_ROWS)
 CELL_SIZE = max(28, int(54 * SCALE))
 FIELD_OFFSET_X = 0
 FIELD_OFFSET_Y = 0
@@ -119,6 +177,8 @@ RAIDER_COLOR = (80, 20, 20)
 CAMP_COLOR = (60, 40, 20)
 LIGHT_BLUE = (130, 220, 255)
 GENERATOR_BLUE = (80, 245, 255)
+GENERATOR_RED = (248, 56, 0)
+CANNON_BLUE = (0, 120, 248)
 FOG_WHITE = (12, 16, 24)
 
 MELEE = "mile"
@@ -126,88 +186,172 @@ RANGE = "range"
 
 MAX_RAIDERS_PER_MINER = 2
 
-HQ_MIN_X, HQ_MIN_Y = 19, 19
+MAP_ROAD_SYMBOLS = {"#", "="}
+MAP_LIGHT_SYMBOLS = {"~", "="}
+
+def map_cells_with_symbols(symbols):
+    return {
+        (x, y)
+        for y, row in enumerate(MAP_ROWS)
+        for x, symbol in enumerate(row)
+        if symbol in symbols
+    }
+
+def get_cell_components(cells):
+    remaining = set(cells)
+    components = []
+    while remaining:
+        start = remaining.pop()
+        stack = [start]
+        component = {start}
+        while stack:
+            x, y = stack.pop()
+            for neighbor in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    component.add(neighbor)
+                    stack.append(neighbor)
+        components.append(frozenset(component))
+    return sorted(components, key=lambda component: (
+        min(cell[1] for cell in component),
+        min(cell[0] for cell in component),
+        len(component)
+    ))
+
+def component_bounds(component):
+    xs = [cell[0] for cell in component]
+    ys = [cell[1] for cell in component]
+    return min(xs), min(ys), max(xs), max(ys)
+
+def require_square_component(component, size, name):
+    min_x, min_y, max_x, max_y = component_bounds(component)
+    if len(component) != size * size or max_x - min_x + 1 != size or max_y - min_y + 1 != size:
+        raise ValueError(f"{name} must be {size}x{size}, got bounds {(min_x, min_y, max_x, max_y)}")
+
+    expected = {
+        (min_x + dx, min_y + dy)
+        for dx in range(size)
+        for dy in range(size)
+    }
+    if set(component) != expected:
+        raise ValueError(f"{name} is not a filled {size}x{size} square")
+
+def adjacent_path_cells(cells):
+    return sorted(
+        {
+            neighbor
+            for x, y in cells
+            for neighbor in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+            if neighbor in PATH_CELLS
+        },
+        key=lambda cell: (cell[1], cell[0])
+    )
+
+def road_neighbors(cell):
+    x, y = cell
+    return sorted(
+        neighbor
+        for neighbor in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+        if neighbor in PATH_CELLS
+    )
+
+def find_road_route(start, goals, penalties=None):
+    penalties = penalties or {}
+    goals = set(goals)
+    queue = [(0, 0, start, None)]
+    visited = {}
+    best_cost = {start: 0}
+    order = 0
+
+    while queue:
+        cost, _, cell, previous = heapq.heappop(queue)
+        if cell in visited:
+            continue
+        visited[cell] = previous
+
+        if cell in goals:
+            route = []
+            current = cell
+            while current is not None:
+                route.append(current)
+                current = visited[current]
+            return list(reversed(route))
+
+        for neighbor in road_neighbors(cell):
+            if neighbor in visited:
+                continue
+            next_cost = cost + 1 + penalties.get(neighbor, 0)
+            if next_cost < best_cost.get(neighbor, 1_000_000):
+                best_cost[neighbor] = next_cost
+                order += 1
+                heapq.heappush(queue, (next_cost, order, neighbor, cell))
+
+    raise ValueError(f"No road route from {start} to any generator entry")
+
+def make_route_pair(start, goals):
+    primary = find_road_route(start, goals)
+    if len(primary) <= 8:
+        return primary, primary[:]
+
+    penalties = {cell: 8 for cell in primary[4:-4]}
+    alternate = find_road_route(start, goals, penalties)
+    return primary, alternate
+
+PATH_CELLS = map_cells_with_symbols(MAP_ROAD_SYMBOLS)
+START_LIGHT_CELLS = map_cells_with_symbols(MAP_LIGHT_SYMBOLS)
+HQ_CELLS = map_cells_with_symbols({"G"})
+require_square_component(frozenset(HQ_CELLS), 3, "Generator")
+HQ_MIN_X, HQ_MIN_Y, _, _ = component_bounds(HQ_CELLS)
 HQ_SIZE_CELLS = 3
-HQ_CELLS = {
-    (HQ_MIN_X + dx, HQ_MIN_Y + dy)
-    for dx in range(HQ_SIZE_CELLS)
-    for dy in range(HQ_SIZE_CELLS)
-}
 HQ_CENTER_X = FIELD_OFFSET_X + (HQ_MIN_X + HQ_SIZE_CELLS / 2) * CELL_SIZE
 HQ_CENTER_Y = FIELD_OFFSET_Y + (HQ_MIN_Y + HQ_SIZE_CELLS / 2) * CELL_SIZE
 GENERATOR_CELLS = set(HQ_CELLS)
-CASTLE_ROAD_CELLS = {
-    (x, y)
-    for x in range(HQ_MIN_X - 1, HQ_MIN_X + HQ_SIZE_CELLS + 1)
-    for y in range(HQ_MIN_Y - 1, HQ_MIN_Y + HQ_SIZE_CELLS + 1)
-    if (x, y) not in HQ_CELLS
-}
-BASE_CASTLE_LIGHT_MARGIN = 5
-CASTLE_LIGHT_ZONE = {
-    (x, y)
-    for x in range(HQ_MIN_X - BASE_CASTLE_LIGHT_MARGIN, HQ_MIN_X + HQ_SIZE_CELLS + BASE_CASTLE_LIGHT_MARGIN)
-    for y in range(HQ_MIN_Y - BASE_CASTLE_LIGHT_MARGIN, HQ_MIN_Y + HQ_SIZE_CELLS + BASE_CASTLE_LIGHT_MARGIN)
-}
 
-def make_square_cells(left, top, size):
-    return frozenset(
-        (left + dx, top + dy)
-        for dx in range(size)
-        for dy in range(size)
-    )
-
-INITIAL_CANNON_FOOTPRINTS = (
-    make_square_cells(HQ_MIN_X - 3, HQ_MIN_Y - 3, 2),
-    make_square_cells(HQ_MIN_X + HQ_SIZE_CELLS + 1, HQ_MIN_Y - 3, 2),
-    make_square_cells(HQ_MIN_X - 3, HQ_MIN_Y + HQ_SIZE_CELLS + 1, 2),
-    make_square_cells(HQ_MIN_X + HQ_SIZE_CELLS + 1, HQ_MIN_Y + HQ_SIZE_CELLS + 1, 2),
-)
+blue_components = get_cell_components(map_cells_with_symbols({"C"}))
+INITIAL_CANNON_FOOTPRINTS = tuple(component for component in blue_components if len(component) == 4)
+for index, footprint in enumerate(INITIAL_CANNON_FOOTPRINTS, start=1):
+    require_square_component(footprint, 2, f"Starting cannon {index}")
+BROKEN_CANNON_CELLS = tuple(sorted(next(iter(component)) for component in blue_components if len(component) == 1))
 CANNON_CELLS = {
     cell
     for footprint in INITIAL_CANNON_FOOTPRINTS
     for cell in footprint
 }
 
+BASE_CASTLE_LIGHT_MARGIN = 0
+CASTLE_LIGHT_ZONE = set(START_LIGHT_CELLS) | set(HQ_CELLS) | set(CANNON_CELLS)
+
+SECRET_CELLS = tuple(sorted(map_cells_with_symbols({"$"}), key=lambda cell: (cell[1], cell[0])))
+HIVE_COMPONENTS = get_cell_components(map_cells_with_symbols({"H"}))
+HIVE_ROAD_KEYS = ("north", "west", "south_east")
+if len(HIVE_COMPONENTS) != len(HIVE_ROAD_KEYS):
+    raise ValueError("Map must contain exactly three 3x3 hives")
+for index, footprint in enumerate(HIVE_COMPONENTS, start=1):
+    require_square_component(footprint, 3, f"Hive {index}")
+HIVE_FOOTPRINTS_BY_ROAD = dict(zip(HIVE_ROAD_KEYS, HIVE_COMPONENTS))
+
 HQ_HITBOX_X1 = FIELD_OFFSET_X + HQ_MIN_X * CELL_SIZE
 HQ_HITBOX_Y1 = FIELD_OFFSET_Y + HQ_MIN_Y * CELL_SIZE
 HQ_HITBOX_X2 = HQ_HITBOX_X1 + HQ_SIZE_CELLS * CELL_SIZE
 HQ_HITBOX_Y2 = HQ_HITBOX_Y1 + HQ_SIZE_CELLS * CELL_SIZE
 
-def make_lane_path(points):
-    cells = []
-    for index, (x, y) in enumerate(points):
-        if index == 0:
-            cells.append((x, y))
-            continue
-
-        prev_x, prev_y = cells[-1]
-        if prev_x != x and prev_y != y:
-            raise ValueError(f"Lane waypoint is diagonal: {(prev_x, prev_y)} -> {(x, y)}")
-
-        if prev_x == x:
-            step = 1 if y > prev_y else -1
-            for current_y in range(prev_y + step, y + step, step):
-                cells.append((x, current_y))
-        else:
-            step = 1 if x > prev_x else -1
-            for current_x in range(prev_x + step, x + step, step):
-                cells.append((current_x, y))
-    return cells
-
-LANES = {
-    "north_a": make_lane_path([(6, 0), (6, 4), (10, 4), (10, 9), (13, 9), (13, 14), (15, 14), (15, 18), (18, 18)]),
-    "north_b": make_lane_path([(30, 0), (30, 6), (27, 6), (27, 11), (24, 11), (24, 15), (21, 15), (21, 18)]),
-    "west_a": make_lane_path([(0, 16), (7, 16), (7, 19), (12, 19), (12, 20), (18, 20)]),
-    "west_b": make_lane_path([(0, 30), (6, 30), (6, 27), (11, 27), (11, 25), (14, 25), (14, 22), (18, 22)]),
-    "south_east_a": make_lane_path([(40, 25), (36, 25), (36, 23), (32, 23), (32, 21), (25, 21), (25, 20), (22, 20)]),
-    "south_east_b": make_lane_path([(31, 40), (31, 35), (28, 35), (28, 31), (25, 31), (25, 27), (22, 27), (22, 22)]),
+HQ_ENTRY_CELLS = tuple(adjacent_path_cells(HQ_CELLS))
+CASTLE_ROAD_CELLS = set(HQ_ENTRY_CELLS)
+HIVE_SPAWN_CELLS_BY_ROAD = {
+    road_key: adjacent_path_cells(footprint)[0]
+    for road_key, footprint in HIVE_FOOTPRINTS_BY_ROAD.items()
 }
 
-ROAD_BRANCHES = {
-    "north": ["north_a", "north_b"],
-    "west": ["west_a", "west_b"],
-    "south_east": ["south_east_a", "south_east_b"]
-}
+LANES = {}
+ROAD_BRANCHES = {}
+for road_key in HIVE_ROAD_KEYS:
+    primary, alternate = make_route_pair(HIVE_SPAWN_CELLS_BY_ROAD[road_key], HQ_ENTRY_CELLS)
+    primary_name = f"{road_key}_a"
+    alternate_name = f"{road_key}_b"
+    LANES[primary_name] = primary
+    LANES[alternate_name] = alternate
+    ROAD_BRANCHES[road_key] = [primary_name, alternate_name]
+
 ROAD_KEYS = list(ROAD_BRANCHES.keys())
 PRIMARY_LANES = [branches[0] for branches in ROAD_BRANCHES.values()]
 LANE_TO_BRANCHES = {
@@ -215,12 +359,6 @@ LANE_TO_BRANCHES = {
     for branches in ROAD_BRANCHES.values()
     for lane_name in branches
 }
-
-PATH_CELLS = set()
-for lane_cells in LANES.values():
-    PATH_CELLS.update(lane_cells)
-PATH_CELLS.update(CASTLE_ROAD_CELLS)
-PATH_CELLS.difference_update(HQ_CELLS)
 
 ALL_PATH_CELLS = set(PATH_CELLS)
 ALL_PATH_CELLS.update(HQ_CELLS)
@@ -1094,7 +1232,7 @@ class Tower:
         stats = {
             "archer": {"damage": 15, "range": base_range, "cooldown": 30, "color": BLUE, "proj_color": CYAN, "hp": 150, "dmg_type": "physical"},
             "mage": {"damage": 20, "range": scaled(120), "cooldown": 40, "color": PURPLE, "proj_color": (255, 0, 255), "hp": 120, "dmg_type": "magical"},
-            "cannon": {"damage": 80, "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": LIGHT_BLUE, "proj_color": (255, 100, 0), "hp": 220, "dmg_type": "physical"},
+            "cannon": {"damage": 80, "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": CANNON_BLUE, "proj_color": (255, 100, 0), "hp": 220, "dmg_type": "physical"},
             "miner": {"damage": 10, "range": scaled(100), "cooldown": 40, "color": ORE_COLOR, "proj_color": ORE_COLOR, "hp": 150, "dmg_type": "physical"},
             "barracks": {"damage": 0, "range": 0, "cooldown": 0, "color": (100, 60, 30), "proj_color": (100, 60, 30), "hp": 300, "dmg_type": "physical"},
             "lamp": {"damage": 0, "range": 0, "cooldown": 0, "color": LIGHT_BLUE, "proj_color": LIGHT_BLUE, "hp": 105, "dmg_type": "physical"},
@@ -1538,22 +1676,22 @@ class Hive:
     def __init__(self, road_key):
         self.road_key = road_key
         self.primary_lane = ROAD_BRANCHES[road_key][0]
-        self.cell = LANES[self.primary_lane][0]
-        self.x = FIELD_OFFSET_X + self.cell[0] * CELL_SIZE + CELL_SIZE // 2
-        self.y = FIELD_OFFSET_Y + self.cell[1] * CELL_SIZE + CELL_SIZE // 2
+        self.cells = set(HIVE_FOOTPRINTS_BY_ROAD[road_key])
+        self.cell = min(self.cells)
+        self.spawn_cell = HIVE_SPAWN_CELLS_BY_ROAD[road_key]
+        self.x, self.y = cells_world_center(self.cells)
         self.hp = 1
         self.max_hp = 1
         self.is_alive = True
         self.is_visible = False
 
     def contains_cell(self, cell):
-        return self.is_alive and self.is_visible and cell == self.cell
+        return self.is_alive and self.is_visible and cell in self.cells
 
     def draw(self, surface):
         if not self.is_alive or not self.is_visible:
             return
-        size = scaled(48)
-        rect = pygame.Rect(int(self.x - size // 2), int(self.y - size // 2), size, size)
+        rect = cells_world_rect(self.cells).inflate(-scaled(4), -scaled(4))
         pygame.draw.rect(surface, PURPLE, rect)
         pygame.draw.rect(surface, BLACK, rect, max(1, scaled(2)))
         label = font_small.render("Hive", True, WHITE)
@@ -1565,7 +1703,7 @@ class MapBonus:
         "currency": GOLD,
         "cannon_upgrade": BLUE,
         "generator_upgrade": GREEN,
-        "broken_cannon": GRAY,
+        "broken_cannon": CANNON_BLUE,
     }
 
     def __init__(self, cell, bonus_type):
@@ -1719,13 +1857,13 @@ class Headquarters:
             HQ_SIZE_CELLS * CELL_SIZE,
             HQ_SIZE_CELLS * CELL_SIZE
         )
-        pygame.draw.rect(surface, GOLD, rect)
+        pygame.draw.rect(surface, GENERATOR_RED, rect)
         pygame.draw.rect(surface, BLACK, rect, scaled(4))
-        pygame.draw.rect(surface, GENERATOR_BLUE, rect, scaled(3))
+        pygame.draw.rect(surface, WHITE, rect, scaled(2))
         center = (int(HQ_CENTER_X), int(HQ_CENTER_Y))
         inner = rect.inflate(-scaled(18), -scaled(18))
-        pygame.draw.rect(surface, (245, 255, 255), inner)
-        draw_square_dot(surface, GENERATOR_BLUE, center, scaled(28), BLACK, max(1, scaled(2)))
+        pygame.draw.rect(surface, (255, 96, 48), inner)
+        draw_square_dot(surface, GENERATOR_RED, center, scaled(28), BLACK, max(1, scaled(2)))
         
         for proj in self.projectiles:
             _, pos = proj
@@ -1894,8 +2032,8 @@ class Game:
             self.pan_camera(dx, dy)
 
     def get_castle_light_zone(self):
-        margin = BASE_CASTLE_LIGHT_MARGIN + max(0, self.hq.level - 1)
-        cells = set()
+        cells = set(CASTLE_LIGHT_ZONE)
+        margin = BASE_CASTLE_LIGHT_MARGIN + max(0, self.hq.level - 1) * 2
         for x in range(HQ_MIN_X - margin, HQ_MIN_X + HQ_SIZE_CELLS + margin):
             for y in range(HQ_MIN_Y - margin, HQ_MIN_Y + HQ_SIZE_CELLS + margin):
                 if 0 <= x < GRID_WIDTH and 0 <= y < GRID_HEIGHT:
@@ -1903,29 +2041,8 @@ class Game:
         return cells
 
     def generate_bonuses(self):
-        rng = random.Random(2026)
-        bonus_types = (
-            ["currency"] * 5
-            + ["cannon_upgrade"] * 2
-            + ["generator_upgrade"]
-            + ["broken_cannon"] * 2
-        )
-        bonuses = []
-        occupied = set(ALL_PATH_CELLS) | set(HQ_CELLS) | set(CANNON_CELLS)
-
-        for bonus_type in bonus_types:
-            for _ in range(400):
-                cell = (rng.randint(2, GRID_WIDTH - 3), rng.randint(2, GRID_HEIGHT - 3))
-                if cell in occupied or cell in CASTLE_LIGHT_ZONE:
-                    continue
-                if any(abs(cell[0] - path[0]) + abs(cell[1] - path[1]) < 3 for path in PATH_CELLS):
-                    continue
-                if any(abs(cell[0] - bonus.cell[0]) + abs(cell[1] - bonus.cell[1]) < 5 for bonus in bonuses):
-                    continue
-                bonuses.append(MapBonus(cell, bonus_type))
-                occupied.add(cell)
-                break
-
+        bonuses = [MapBonus(cell, "currency") for cell in SECRET_CELLS]
+        bonuses.extend(MapBonus(cell, "broken_cannon") for cell in BROKEN_CANNON_CELLS)
         return bonuses
 
     def notify(self, text, duration=120):
@@ -2177,7 +2294,7 @@ class Game:
             self.update_discovered_veins()
         if hasattr(self, "hives"):
             for hive in self.hives:
-                hive.is_visible = hive.is_alive and self.is_position_lit((hive.x, hive.y))
+                hive.is_visible = hive.is_alive and any(self.is_lit(cell) for cell in hive.cells)
         if hasattr(self, "bonuses"):
             for bonus in self.bonuses:
                 if self.is_lit(bonus.cell):
@@ -2202,7 +2319,7 @@ class Game:
             return False
         if is_hq_cell(cell) or is_any_path_cell(cell):
             return False
-        if any(hive.is_alive and hive.cell == cell for hive in getattr(self, "hives", [])):
+        if any(hive.is_alive and cell in hive.cells for hive in getattr(self, "hives", [])):
             return False
         if any((not bonus.is_collected) and bonus.cell == cell for bonus in getattr(self, "bonuses", [])):
             return False
@@ -2261,7 +2378,7 @@ class Game:
             return None
         lane = hive.primary_lane
         enemy = Enemy(enemy_type, lane)
-        enemy.pos = [hive.x, hive.y]
+        enemy.pos = list(get_path_pixels(lane)[0])
         enemy.path_index = 0
         hp_bonus = 1 + max(0, self.wave - 1) * 0.12
         speed_bonus = 1 + max(0, self.wave - 1) * 0.035
