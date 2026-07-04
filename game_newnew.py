@@ -148,6 +148,7 @@ ROTATABLE_LIGHT_TYPES = {"lamp"}
 ROUTE_LIGHT_LOOKAHEAD_CELLS = 9
 ROUTE_LIGHT_SWITCH_MIN_LIT = 4
 ROUTE_LIGHT_SWITCH_RATIO = 0.45
+ADAPTIVE_ROUTE_WAVE_INTERVAL = 3
 ENEMY_HEALTH_MULTIPLIER = 2.0
 ENEMY_SPEED_MULTIPLIER = 1.5
 DIMMER_START_WAVE = 3
@@ -2133,6 +2134,36 @@ class Game:
         lit_count = sum(1 for cell in segment if self.is_lit(cell))
         return lit_count, len(segment)
 
+    def get_lane_total_light_pressure(self, lane):
+        cells = LANES.get(lane, [])
+        if not cells:
+            return 0, 0, 0
+        lit_count = sum(1 for cell in cells if self.is_lit(cell))
+        return lit_count, len(cells), lit_count / len(cells)
+
+    def is_adaptive_route_wave(self):
+        return self.wave > 0 and self.wave % ADAPTIVE_ROUTE_WAVE_INTERVAL == 0
+
+    def choose_least_lit_lane(self, road_key):
+        branches = ROAD_BRANCHES.get(road_key, [])
+        if not branches:
+            return None
+        return min(
+            branches,
+            key=lambda lane: (
+                self.get_lane_total_light_pressure(lane)[2],
+                self.get_lane_total_light_pressure(lane)[0],
+                lane,
+            )
+        )
+
+    def choose_spawn_lane(self, hive):
+        if self.is_adaptive_route_wave():
+            lane = self.choose_least_lit_lane(hive.road_key)
+            if lane:
+                return lane
+        return hive.primary_lane
+
     def update_dimmers(self):
         for enemy in self.enemies:
             if not enemy.alive or enemy.enemy_type != "dimmer":
@@ -2372,14 +2403,17 @@ class Game:
                 return hive
         return None
 
-    def create_wave_enemy(self, enemy_type, road_key):
+    def create_wave_enemy(self, enemy_type, road_key, lane=None):
         hive = self.get_hive_by_road_key(road_key)
         if not hive or not hive.is_alive:
             return None
-        lane = hive.primary_lane
+        if lane not in ROAD_BRANCHES.get(road_key, []):
+            lane = hive.primary_lane
         enemy = Enemy(enemy_type, lane)
         enemy.pos = list(get_path_pixels(lane)[0])
         enemy.path_index = 0
+        if self.is_adaptive_route_wave():
+            enemy.switched_lane = True
         hp_bonus = 1 + max(0, self.wave - 1) * 0.12
         speed_bonus = 1 + max(0, self.wave - 1) * 0.035
         reward_bonus = 1 + max(0, self.wave - 1) * 0.1
@@ -2415,8 +2449,9 @@ class Game:
             for hive in self.hives:
                 if not hive.is_alive:
                     continue
+                spawn_lane = self.choose_spawn_lane(hive)
                 for index in range(count_per_hive):
-                    self.spawn_queue.append((self.enemy_type_for_wave(index), hive.road_key))
+                    self.spawn_queue.append((self.enemy_type_for_wave(index), hive.road_key, spawn_lane))
             
             self.wave_active = True
             self.wave_timer = 0
@@ -3117,8 +3152,8 @@ class Game:
         if self.wave_active and not self.wave_delay_active and self.spawn_queue:
             self.wave_timer += 1
             if self.wave_timer >= 40:
-                e_type, road_key = self.spawn_queue.pop(0)
-                enemy = self.create_wave_enemy(e_type, road_key)
+                e_type, road_key, lane = self.spawn_queue.pop(0)
+                enemy = self.create_wave_enemy(e_type, road_key, lane)
                 if enemy:
                     self.enemies.append(enemy)
                 self.wave_timer = 0
