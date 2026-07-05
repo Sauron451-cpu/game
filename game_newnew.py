@@ -15,14 +15,14 @@ clock = pygame.time.Clock()
 
 SCALE = SCREEN_HEIGHT / 1500
 
-font_size_small = max(36, int(54 * SCALE))
-font_size_medium = max(42, int(72 * SCALE))
-font_size_large = max(60, int(108 * SCALE))
+font_size_small = max(30, int(50 * SCALE))
+font_size_medium = max(40, int(66 * SCALE))
+font_size_large = max(58, int(98 * SCALE))
 font_small = pygame.font.Font(None, font_size_small)
 font_medium = pygame.font.Font(None, font_size_medium)
 font_large = pygame.font.Font(None, font_size_large)
 
-SIDE_PANEL_WIDTH = int(SCREEN_WIDTH * 0.22)
+SIDE_PANEL_WIDTH = max(280, min(int(SCREEN_WIDTH * 0.23), 430))
 AVAILABLE_MAP_WIDTH = SCREEN_WIDTH - 2 * SIDE_PANEL_WIDTH
 VIEWPORT_SIZE = min(AVAILABLE_MAP_WIDTH, SCREEN_HEIGHT)
 VIEWPORT_X = SIDE_PANEL_WIDTH + (AVAILABLE_MAP_WIDTH - VIEWPORT_SIZE) // 2
@@ -138,6 +138,11 @@ ROUTE_LIGHT_SWITCH_RATIO = 0.45
 ADAPTIVE_ROUTE_WAVE_INTERVAL = 3
 ENEMY_HEALTH_MULTIPLIER = 2.0
 ENEMY_SPEED_MULTIPLIER = 1.5
+ENEMY_HP_GROWTH_PER_WAVE = 0.20
+ENEMY_SPEED_GROWTH_PER_WAVE = 0.04
+ENEMY_DAMAGE_GROWTH_PER_WAVE = 0.10
+ENEMY_REWARD_GROWTH_PER_WAVE = 0.10
+ENEMY_DARK_SPEED_MULTIPLIER = 7.0
 DIMMER_START_WAVE = 3
 DIMMER_LAMP_DISABLE_RADIUS = 3
 DIMMER_LAMP_DISABLE_DURATION = 120
@@ -153,7 +158,14 @@ YELLOW = (255, 255, 0)
 PURPLE = (128, 0, 128)
 CYAN = (0, 255, 255)
 GOLD = (255, 215, 0)
-PANEL_BG = (30, 30, 30)
+UI_PANEL = (18, 22, 30)
+UI_CARD = (35, 42, 55)
+UI_CARD_HOT = (44, 56, 76)
+UI_STROKE = (92, 116, 140)
+UI_TEXT_DIM = (170, 185, 198)
+UI_GOOD = (102, 235, 142)
+UI_WARN = (255, 202, 78)
+UI_BAD = (255, 100, 106)
 LIGHT_BLUE = (130, 220, 255)
 GENERATOR_BLUE = (80, 245, 255)
 GENERATOR_RED = (248, 56, 0)
@@ -399,6 +411,55 @@ def distance_to_hq_hitbox(pos):
 def scaled(val):
     return int(val * SCALE)
 
+FONT_CACHE = {}
+
+def ui_font(size):
+    size = max(12, int(size))
+    if size not in FONT_CACHE:
+        FONT_CACHE[size] = pygame.font.Font(None, size)
+    return FONT_CACHE[size]
+
+def fitted_text_surface(text, color, max_width, max_height, max_size=None, min_size=14):
+    text = str(text)
+    max_size = int(max_size or font_size_small)
+    min_size = max(10, int(min_size))
+    for size in range(max_size, min_size - 1, -2):
+        rendered = ui_font(size).render(text, True, color)
+        if rendered.get_width() <= max_width and rendered.get_height() <= max_height:
+            return rendered
+    return ui_font(min_size).render(text, True, color)
+
+def draw_fitted_text(surface, text, rect, color=WHITE, max_size=None, min_size=14, align="left", valign="center"):
+    rendered = fitted_text_surface(text, color, rect.w, rect.h, max_size, min_size)
+    if align == "center":
+        x = rect.centerx - rendered.get_width() // 2
+    elif align == "right":
+        x = rect.right - rendered.get_width()
+    else:
+        x = rect.x
+    if valign == "top":
+        y = rect.y
+    elif valign == "bottom":
+        y = rect.bottom - rendered.get_height()
+    else:
+        y = rect.centery - rendered.get_height() // 2
+    surface.blit(rendered, (x, y))
+    return rendered
+
+def draw_card(surface, rect, fill=UI_CARD, stroke=UI_STROKE, radius=None):
+    radius = scaled(6) if radius is None else radius
+    pygame.draw.rect(surface, fill, rect, border_radius=radius)
+    pygame.draw.rect(surface, stroke, rect, max(1, scaled(2)), border_radius=radius)
+
+def draw_progress_bar(surface, rect, fraction, fill=UI_GOOD, back=(14, 17, 23), stroke=BLACK):
+    fraction = max(0, min(1, fraction))
+    pygame.draw.rect(surface, back, rect, border_radius=scaled(3))
+    if fraction > 0:
+        filled = rect.copy()
+        filled.w = max(1, int(rect.w * fraction))
+        pygame.draw.rect(surface, fill, filled, border_radius=scaled(3))
+    pygame.draw.rect(surface, stroke, rect, max(1, scaled(1)), border_radius=scaled(3))
+
 def draw_square_dot(surface, color, center, size, border_color=None, border_width=0):
     size = max(1, int(size))
     rect = pygame.Rect(int(center[0] - size // 2), int(center[1] - size // 2), size, size)
@@ -501,6 +562,11 @@ class Enemy:
         self.switched_lane = True
         return True
 
+    def current_move_speed(self, game):
+        if game is not None and not game.is_position_lit(self.pos):
+            return self.speed * ENEMY_DARK_SPEED_MULTIPLIER
+        return self.speed
+
     def move(self, hq, game=None):
         if not self.alive:
             return
@@ -508,6 +574,7 @@ class Enemy:
             self.attack_cooldown -= 1
 
         self.maybe_switch_for_light(game)
+        move_speed = self.current_move_speed(game)
 
         if hq.hp > 0 and distance_to_hq_hitbox(self.pos) <= self.attack_range:
             if self.attack_cooldown <= 0:
@@ -527,12 +594,12 @@ class Enemy:
         dx = target_pos[0] - self.pos[0]
         dy = target_pos[1] - self.pos[1]
         dist = math.hypot(dx, dy)
-        if dist < self.speed * 1.5 or dist < 5:
+        if dist < move_speed * 1.5 or dist < 5:
             self.pos = list(target_pos)
             self.path_index += 1
         else:
-            self.pos[0] += (dx / dist) * self.speed
-            self.pos[1] += (dy / dist) * self.speed
+            self.pos[0] += (dx / dist) * move_speed
+            self.pos[1] += (dy / dist) * move_speed
 
     def take_damage(self, damage, damage_type, damage_source=None):
         effective = damage * (1 - (self.phys_armor if damage_type == "physical" else self.mag_armor))
@@ -900,16 +967,19 @@ class Game:
         self.tower_to_specialize = None
         self.lit_cells = self.get_castle_light_zone() | set(GENERATOR_CELLS)
         self.revealed_cells = set(self.lit_cells)
+        self.fog_surface = pygame.Surface((FIELD_WIDTH, FIELD_HEIGHT), pygame.SRCALPHA)
+        self.fog_dirty = True
 
         self.wave_interval = 0
         self.wave_interval_timer = 0
-        self.wave_delay = 600
+        self.wave_delay = 300
         self.wave_delay_timer = 0
         self.wave_delay_active = False
         
         self.total_waves = 999
 
         self.spawn_queue = []
+        self.wave_spawn_total = 0
         self.zoom = START_ZOOM
         self.camera_x = HQ_CENTER_X - VIEWPORT_WIDTH / self.zoom / 2
         self.camera_y = HQ_CENTER_Y - VIEWPORT_HEIGHT / self.zoom / 2
@@ -1185,7 +1255,7 @@ class Game:
         hive.is_alive = False
         active_lanes = set(ROAD_BRANCHES[hive.road_key])
         self.enemies = [enemy for enemy in self.enemies if enemy.lane not in active_lanes]
-        self.spawn_queue = [item for item in self.spawn_queue if item[1] != hive.road_key]
+        self.remove_spawn_queue_road(hive.road_key)
         self.selected_hive = None
         self.notify("Hive destroyed")
         if all(not hive.is_alive for hive in self.hives):
@@ -1281,6 +1351,7 @@ class Game:
             for cell in tower.cells
         }
         self.revealed_cells = set(lit) | light_tower_cells
+        self.fog_dirty = True
         if hasattr(self, "hives"):
             for hive in self.hives:
                 hive.is_visible = hive.is_alive and any(self.is_lit(cell) for cell in hive.cells)
@@ -1341,6 +1412,24 @@ class Game:
                 return hive
         return None
 
+    def queued_enemy_count(self):
+        total = 0
+        for batch in self.spawn_queue:
+            total += 1 if isinstance(batch, tuple) else len(batch)
+        return total
+
+    def remove_spawn_queue_road(self, road_key):
+        filtered_queue = []
+        for batch in self.spawn_queue:
+            if isinstance(batch, tuple):
+                if batch[1] != road_key:
+                    filtered_queue.append(batch)
+                continue
+            filtered_batch = [entry for entry in batch if entry[1] != road_key]
+            if filtered_batch:
+                filtered_queue.append(filtered_batch)
+        self.spawn_queue = filtered_queue
+
     def create_wave_enemy(self, enemy_type, road_key, lane=None):
         hive = self.get_hive_by_road_key(road_key)
         if not hive or not hive.is_alive:
@@ -1352,13 +1441,16 @@ class Game:
         enemy.path_index = 0
         if self.is_adaptive_route_wave():
             enemy.switched_lane = True
-        hp_bonus = 1 + max(0, self.wave - 1) * 0.12
-        speed_bonus = 1 + max(0, self.wave - 1) * 0.035
-        reward_bonus = 1 + max(0, self.wave - 1) * 0.1
+        wave_steps = max(0, self.wave - 1)
+        hp_bonus = 1 + wave_steps * ENEMY_HP_GROWTH_PER_WAVE
+        speed_bonus = 1 + wave_steps * ENEMY_SPEED_GROWTH_PER_WAVE
+        damage_bonus = 1 + wave_steps * ENEMY_DAMAGE_GROWTH_PER_WAVE
+        reward_bonus = 1 + wave_steps * ENEMY_REWARD_GROWTH_PER_WAVE
         enemy.max_hp = int(enemy.max_hp * hp_bonus)
         enemy.hp = enemy.max_hp
         enemy.speed *= speed_bonus
         enemy.base_speed = enemy.speed
+        enemy.attack_damage = max(1, int(round(enemy.attack_damage * damage_bonus)))
         enemy.reward = int(enemy.reward * reward_bonus)
         return enemy
 
@@ -1384,15 +1476,21 @@ class Game:
             
             self.spawn_queue = []
             count_per_hive = max(1, int((5 + self.wave - 1) * self.hive_spawn_multiplier()))
-            for hive in self.hives:
-                if not hive.is_alive:
-                    continue
-                spawn_lane = self.choose_spawn_lane(hive)
-                for index in range(count_per_hive):
-                    self.spawn_queue.append((self.enemy_type_for_wave(index), hive.road_key, spawn_lane))
+            active_hives = [hive for hive in self.hives if hive.is_alive]
+            spawn_lanes = {
+                hive.road_key: self.choose_spawn_lane(hive)
+                for hive in active_hives
+            }
+            for index in range(count_per_hive):
+                spawn_batch = []
+                for hive in active_hives:
+                    spawn_batch.append((self.enemy_type_for_wave(index), hive.road_key, spawn_lanes[hive.road_key]))
+                if spawn_batch:
+                    self.spawn_queue.append(spawn_batch)
             
             self.wave_active = True
             self.wave_timer = 0
+            self.wave_spawn_total = self.queued_enemy_count()
             self.wave_delay_active = self.wave_delay > 0
             self.wave_delay_timer = 0
             self.wave_interval_timer = 0
@@ -1423,13 +1521,15 @@ class Game:
 
     def upgrade_tower(self):
         if self.selected_tower and self.selected_tower.hp > 0:
-            if self.selected_tower.tower_type == "cannon" and self.selected_tower.level == 1 and not self.selected_tower.specialization:
-                self.tower_specialization_pending = True
-                self.tower_to_specialize = self.selected_tower
-                return False
-            
             cost = TOWER_UPGRADE_COST.get(self.selected_tower.tower_type)
             if cost is None:
+                return False
+            if self.selected_tower.tower_type == "cannon" and self.selected_tower.level == 1 and not self.selected_tower.specialization:
+                if self.money < cost:
+                    self.notify("Need more light for upgrade")
+                    return False
+                self.tower_specialization_pending = True
+                self.tower_to_specialize = self.selected_tower
                 return False
             if self.money >= cost:
                 if self.selected_tower.upgrade():
@@ -1464,7 +1564,12 @@ class Game:
                 self.tower_specialization_pending = False
                 self.tower_to_specialize = None
                 return True
+            self.notify("Need more light for upgrade")
         return False
+
+    def cancel_tower_specialization(self):
+        self.tower_specialization_pending = False
+        self.tower_to_specialize = None
 
     def begin_tower_specialization_change(self):
         if (
@@ -1529,13 +1634,52 @@ class Game:
     def get_tower_display_name(self, tower_type):
         return TOWER_DISPLAY_NAMES.get(tower_type, tower_type.capitalize())
 
+    def panel_sizes(self):
+        return {
+            "pad": max(14, scaled(20)),
+            "gap": max(8, scaled(10)),
+            "button_h": max(52, scaled(64)),
+            "metric_h": max(58, scaled(68)),
+            "title_h": max(52, scaled(64)),
+        }
+
+    def wave_state_text(self):
+        if self.paused:
+            return "Paused"
+        if self.wave_delay_active:
+            seconds = max(0, math.ceil((self.wave_delay - self.wave_delay_timer) / 60))
+            return f"Attack in {seconds}s"
+        if self.wave_active:
+            return "Wave active"
+        return "Preparing"
+
+    def draw_metric_card(self, surface, rect, icon_type, label, value, accent=CYAN):
+        draw_card(surface, rect, UI_CARD)
+        icon_size = min(rect.h - scaled(12), scaled(34))
+        icon_x = rect.x + scaled(20)
+        self.draw_stat_icon(surface, icon_type, (icon_x, rect.centery), icon_size)
+        text_x = rect.x + scaled(44)
+        label_rect = pygame.Rect(text_x, rect.y + scaled(5), rect.right - text_x - scaled(8), rect.h // 2)
+        value_rect = pygame.Rect(text_x, rect.y + rect.h // 2 - scaled(2), rect.right - text_x - scaled(8), rect.h // 2)
+        draw_fitted_text(surface, label, label_rect, UI_TEXT_DIM, max_size=font_size_small - 4, min_size=12)
+        draw_fitted_text(surface, value, value_rect, WHITE, max_size=font_size_medium, min_size=14)
+        pygame.draw.rect(surface, accent, (rect.x, rect.y, max(3, scaled(4)), rect.h), border_radius=scaled(4))
+
+    def draw_context_line(self, surface, label, value, rect, accent=UI_TEXT_DIM):
+        draw_card(surface, rect, (26, 32, 43), (56, 70, 86), radius=scaled(4))
+        label_rect = pygame.Rect(rect.x + scaled(10), rect.y + scaled(4), rect.w - scaled(20), rect.h // 2)
+        value_rect = pygame.Rect(rect.x + scaled(10), rect.y + rect.h // 2 - scaled(2), rect.w - scaled(20), rect.h // 2)
+        draw_fitted_text(surface, label, label_rect, accent, max_size=font_size_small - 4, min_size=12)
+        draw_fitted_text(surface, value, value_rect, WHITE, max_size=font_size_small, min_size=12)
+
     def get_left_build_buttons(self):
         buttons = []
-        btn_width = SIDE_PANEL_WIDTH - scaled(40)
-        btn_height = scaled(64)
-        btn_gap = scaled(14)
-        left_x = scaled(20)
-        start_y = SCREEN_HEIGHT - scaled(40) - len(BUILDABLE_TOWER_TYPES) * btn_height - (len(BUILDABLE_TOWER_TYPES) - 1) * btn_gap
+        sizes = self.panel_sizes()
+        btn_width = SIDE_PANEL_WIDTH - sizes["pad"] * 2
+        btn_height = sizes["button_h"]
+        btn_gap = sizes["gap"]
+        left_x = sizes["pad"]
+        start_y = SCREEN_HEIGHT - sizes["pad"] - len(BUILDABLE_TOWER_TYPES) * btn_height - (len(BUILDABLE_TOWER_TYPES) - 1) * btn_gap
         for tower_type in BUILDABLE_TOWER_TYPES:
             buttons.append({
                 "action": f"build:{tower_type}",
@@ -1552,11 +1696,19 @@ class Game:
         return buttons
 
     def get_pause_button(self):
+        sizes = self.panel_sizes()
+        pause_y = (
+            sizes["pad"]
+            + sizes["title_h"]
+            + sizes["gap"]
+            + 4 * (sizes["metric_h"] + sizes["gap"])
+            + sizes["gap"]
+        )
         return {
             "title": "Resume" if self.paused else "Pause",
             "enabled": not self.defeat and not self.victory,
             "selected": self.paused,
-            "rect": pygame.Rect(scaled(20), scaled(380), SIDE_PANEL_WIDTH - scaled(40), scaled(64)),
+            "rect": pygame.Rect(sizes["pad"], pause_y, SIDE_PANEL_WIDTH - sizes["pad"] * 2, sizes["button_h"]),
         }
 
     def get_right_panel_buttons(self):
@@ -1636,12 +1788,13 @@ class Game:
         return buttons
 
     def get_right_panel_layout(self):
-        right_x = SCREEN_WIDTH - SIDE_PANEL_WIDTH + scaled(20)
-        btn_width = SIDE_PANEL_WIDTH - scaled(40)
-        btn_height = scaled(64)
-        btn_gap = scaled(14)
+        sizes = self.panel_sizes()
+        right_x = SCREEN_WIDTH - SIDE_PANEL_WIDTH + sizes["pad"]
+        btn_width = SIDE_PANEL_WIDTH - sizes["pad"] * 2
+        btn_height = sizes["button_h"]
+        btn_gap = sizes["gap"]
         buttons = self.get_right_panel_buttons()
-        start_y = SCREEN_HEIGHT - scaled(40) - len(buttons) * btn_height - max(0, len(buttons) - 1) * btn_gap
+        start_y = SCREEN_HEIGHT - sizes["pad"] - len(buttons) * btn_height - max(0, len(buttons) - 1) * btn_gap
         return buttons, right_x, btn_width, start_y, btn_gap, btn_height
 
     def run_right_panel_action(self, action):
@@ -1780,26 +1933,34 @@ class Game:
         if amount is None:
             return
         x, y = pos
-        self.draw_energy_icon(surface, (x + scaled(14), y + scaled(16)), scaled(26))
-        text = font_small.render(str(int(amount)), True, text_color)
-        surface.blit(text, (x + scaled(34), y - scaled(2)))
+        icon_size = max(18, scaled(24))
+        self.draw_energy_icon(surface, (x + icon_size // 2, y + icon_size // 2), icon_size)
+        text_rect = pygame.Rect(x + icon_size + scaled(4), y - scaled(2), scaled(58), icon_size + scaled(4))
+        draw_fitted_text(surface, int(amount), text_rect, text_color, max_size=font_size_small, min_size=12)
 
     def draw_panel_button(self, surface, rect, title, cost=None, enabled=True, selected=False, danger=False):
         if selected:
-            color = (86, 255, 82)
+            color = UI_CARD_HOT
+            stroke = CYAN
         elif danger:
-            color = (255, 95, 95) if enabled else (120, 70, 70)
+            color = (130, 48, 54) if enabled else (70, 48, 52)
+            stroke = UI_BAD if enabled else (92, 70, 74)
         elif enabled:
-            color = (92, 255, 92)
+            color = (48, 84, 66)
+            stroke = UI_GOOD
         else:
-            color = (190, 190, 190)
-        pygame.draw.rect(surface, color, rect, border_radius=scaled(4))
-        pygame.draw.rect(surface, BLACK, rect, max(1, scaled(2)), border_radius=scaled(4))
-        title_text = font_small.render(title, True, BLACK)
-        surface.blit(title_text, (rect.x + scaled(10), rect.y + (rect.h - title_text.get_height()) // 2))
+            color = (48, 52, 59)
+            stroke = (82, 86, 94)
+        draw_card(surface, rect, color, stroke, radius=scaled(6))
+        text_color = WHITE if enabled else (150, 154, 160)
+        title_width = rect.w - scaled(20)
+        if cost is not None:
+            title_width -= scaled(86)
+        title_rect = pygame.Rect(rect.x + scaled(10), rect.y + scaled(4), title_width, rect.h - scaled(8))
+        draw_fitted_text(surface, title, title_rect, text_color, max_size=font_size_small, min_size=12)
         if cost is not None:
             cost_x = rect.right - scaled(82)
-            self.draw_cost(surface, cost, (cost_x, rect.y + (rect.h - scaled(34)) // 2), BLACK)
+            self.draw_cost(surface, cost, (cost_x, rect.y + (rect.h - max(22, scaled(28))) // 2), WHITE if enabled else (150, 154, 160))
 
     def draw_right_panel_buttons(self, surface):
         buttons, right_x, btn_width, start_y, btn_gap, btn_height = self.get_right_panel_layout()
@@ -1816,24 +1977,31 @@ class Game:
             )
 
     def draw_left_panel(self, surface):
-        x_indent = scaled(30)
-        icon_x = x_indent + scaled(18)
-        text_x = x_indent + scaled(62)
-        y = scaled(70)
-        row_gap = scaled(72)
+        sizes = self.panel_sizes()
+        pad = sizes["pad"]
+        gap = sizes["gap"]
+        panel_rect = pygame.Rect(0, 0, SIDE_PANEL_WIDTH, SCREEN_HEIGHT)
+        pygame.draw.rect(surface, UI_PANEL, panel_rect)
+        pygame.draw.line(surface, UI_STROKE, (SIDE_PANEL_WIDTH - 1, 0), (SIDE_PANEL_WIDTH - 1, SCREEN_HEIGHT), max(1, scaled(2)))
+
+        title_rect = pygame.Rect(pad, pad, SIDE_PANEL_WIDTH - pad * 2, sizes["title_h"])
+        draw_fitted_text(surface, "The Eternity Covenant", title_rect, WHITE, max_size=font_size_medium, min_size=16)
+
+        y = title_rect.bottom + gap
+        card_w = SIDE_PANEL_WIDTH - pad * 2
+        card_h = sizes["metric_h"]
         total_hives = len(self.hives)
         alive_hives = sum(1 for hive in self.hives if hive.is_alive)
         stats = [
-            ("heart", f"{int(self.hq.hp)}/{int(self.hq.max_hp)}"),
-            ("energy", str(int(self.money))),
-            ("tower", f"{self.built_light_tower_count()}/{self.hq.scout_limit}"),
-            ("target", f"{total_hives - alive_hives}/{total_hives}"),
+            ("heart", "Generator", f"{int(self.hq.hp)}/{int(self.hq.max_hp)}", UI_BAD),
+            ("energy", "Light", str(int(self.money)), GOLD),
+            ("tower", "Lamps", f"{self.built_light_tower_count()}/{self.hq.scout_limit}", GENERATOR_BLUE),
+            ("target", "Hives", f"{total_hives - alive_hives}/{total_hives}", UI_WARN),
         ]
-        for icon_type, value in stats:
-            self.draw_stat_icon(surface, icon_type, (icon_x, y + scaled(20)), scaled(44))
-            rendered = font_medium.render(value, True, WHITE)
-            surface.blit(rendered, (text_x, y))
-            y += row_gap
+        for icon_type, label, value, accent in stats:
+            rect = pygame.Rect(pad, y, card_w, card_h)
+            self.draw_metric_card(surface, rect, icon_type, label, value, accent)
+            y += card_h + gap
 
         pause_button = self.get_pause_button()
         self.draw_panel_button(
@@ -1845,11 +2013,11 @@ class Game:
             pause_button["selected"],
         )
 
-        build_label = font_small.render("Build", True, WHITE)
         build_buttons = self.get_left_build_buttons()
         if build_buttons:
             label_y = build_buttons[0]["rect"].y - scaled(46)
-            surface.blit(build_label, (scaled(24), label_y))
+            label_rect = pygame.Rect(pad, label_y, card_w, scaled(32))
+            draw_fitted_text(surface, "Build", label_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=12)
         for button in build_buttons:
             self.draw_panel_button(
                 surface,
@@ -1861,21 +2029,79 @@ class Game:
             )
 
     def draw_right_panel_context(self, surface):
+        sizes = self.panel_sizes()
         panel_x = SCREEN_WIDTH - SIDE_PANEL_WIDTH
-        content_x = panel_x + scaled(20)
-        info_y = SCREEN_HEIGHT - scaled(280)
+        pad = sizes["pad"]
+        gap = sizes["gap"]
+        content_x = panel_x + pad
+        content_w = SIDE_PANEL_WIDTH - pad * 2
+        pygame.draw.rect(surface, UI_PANEL, (panel_x, 0, SIDE_PANEL_WIDTH, SCREEN_HEIGHT))
+        pygame.draw.line(surface, UI_STROKE, (panel_x, 0), (panel_x, SCREEN_HEIGHT), max(1, scaled(2)))
+
+        buttons, _, _, button_start_y, _, _ = self.get_right_panel_layout()
+        context_bottom = button_start_y - gap
+        title_rect = pygame.Rect(content_x, pad, content_w, sizes["title_h"])
+
         if self.selected_tower and self.selected_tower.hp > 0:
             name = self.get_tower_display_name(self.selected_tower.tower_type)
-            name_text = font_small.render(name, True, WHITE)
-            surface.blit(name_text, (content_x, info_y))
+            draw_fitted_text(surface, f"{name} LVL {self.selected_tower.level}", title_rect, WHITE, max_size=font_size_medium, min_size=15)
+            y = title_rect.bottom + gap
+            hp_rect = pygame.Rect(content_x, y, content_w, max(44, scaled(54)))
+            draw_card(surface, hp_rect, UI_CARD)
+            hp_label = pygame.Rect(hp_rect.x + scaled(10), hp_rect.y + scaled(4), hp_rect.w - scaled(20), hp_rect.h // 2)
+            draw_fitted_text(surface, "HP", hp_label, UI_TEXT_DIM, max_size=font_size_small - 4, min_size=12)
+            hp_bar = pygame.Rect(hp_rect.x + scaled(10), hp_rect.y + hp_rect.h // 2 + scaled(4), hp_rect.w - scaled(20), max(8, scaled(12)))
+            draw_progress_bar(surface, hp_bar, self.selected_tower.hp / self.selected_tower.max_hp, UI_GOOD)
+            y = hp_rect.bottom + gap
+
+            lines = []
+            if self.selected_tower.tower_type == "cannon":
+                status = "Broken" if self.selected_tower.broken else (self.selected_tower.specialization or "Base")
+                lines = [
+                    ("Damage", self.selected_tower.damage),
+                    ("Cooldown", f"{self.selected_tower.cooldown_max}f"),
+                    ("Mode", status),
+                ]
+            elif self.selected_tower.tower_type in LIGHT_TOWER_TYPES:
+                powered = "Disabled" if self.selected_tower.disabled_timer > 0 else ("Powered" if self.selected_tower.is_powered else "No power")
+                pattern = "Beam" if self.selected_tower.tower_type == "lamp" else "Beacon"
+                lines = [
+                    ("Status", powered),
+                    ("Pattern", pattern),
+                    ("Level", self.selected_tower.level),
+                ]
+            for label, value in lines:
+                line_h = max(42, scaled(50))
+                if y + line_h > context_bottom:
+                    break
+                self.draw_context_line(surface, label, value, pygame.Rect(content_x, y, content_w, line_h))
+                y += line_h + gap
         elif self.selected_hive and self.selected_hive.is_alive:
-            surface.blit(font_small.render("Hive", True, WHITE), (content_x, info_y))
-            hp_text = font_small.render(f"{int(self.selected_hive.hp)}/{int(self.selected_hive.max_hp)}", True, WHITE)
-            surface.blit(hp_text, (content_x, info_y + scaled(42)))
+            draw_fitted_text(surface, "Hive", title_rect, WHITE, max_size=font_size_medium, min_size=16)
+            y = title_rect.bottom + gap
+            self.draw_context_line(surface, "State", "Visible", pygame.Rect(content_x, y, content_w, max(42, scaled(50))), PURPLE)
+            y += max(42, scaled(50)) + gap
+            self.draw_context_line(surface, "Artillery cost", ARTILLERY_COST, pygame.Rect(content_x, y, content_w, max(42, scaled(50))), GOLD)
         else:
-            surface.blit(font_small.render("Generator", True, WHITE), (content_x, info_y))
-            hp_text = font_small.render(f"{int(self.hq.hp)}/{int(self.hq.max_hp)}", True, WHITE)
-            surface.blit(hp_text, (content_x, info_y + scaled(42)))
+            draw_fitted_text(surface, f"Generator LVL {self.hq.level}", title_rect, WHITE, max_size=font_size_medium, min_size=16)
+            y = title_rect.bottom + gap
+            hp_rect = pygame.Rect(content_x, y, content_w, max(44, scaled(54)))
+            draw_card(surface, hp_rect, UI_CARD)
+            draw_fitted_text(surface, f"{int(self.hq.hp)}/{int(self.hq.max_hp)} HP", pygame.Rect(hp_rect.x + scaled(10), hp_rect.y, hp_rect.w - scaled(20), hp_rect.h // 2), WHITE, max_size=font_size_small, min_size=12)
+            hp_bar = pygame.Rect(hp_rect.x + scaled(10), hp_rect.y + hp_rect.h // 2 + scaled(4), hp_rect.w - scaled(20), max(8, scaled(12)))
+            draw_progress_bar(surface, hp_bar, self.hq.hp / self.hq.max_hp, UI_WARN)
+            y = hp_rect.bottom + gap
+            lines = [
+                ("Income", f"{self.hq.income_per_second}/s"),
+                ("Lamp limit", self.hq.scout_limit),
+                ("Upgrade", self.hq.upgrade_cost() if self.hq.upgrade_cost() is not None else "Max"),
+            ]
+            for label, value in lines:
+                line_h = max(42, scaled(50))
+                if y + line_h > context_bottom:
+                    break
+                self.draw_context_line(surface, label, value, pygame.Rect(content_x, y, content_w, line_h))
+                y += line_h + gap
         self.draw_right_panel_buttons(surface)
 
     def get_specialization_options(self):
@@ -1885,24 +2111,75 @@ class Game:
             ("Gatling", (120, 230, 140), "gatling"),
         ]
 
+    def draw_top_status(self, surface):
+        pad = max(10, scaled(14))
+        gap = max(8, scaled(10))
+        card_h = max(52, scaled(64))
+        max_w = VIEWPORT_WIDTH - pad * 2
+        card_w = max(88, (max_w - gap * 3) // 4)
+        total_w = card_w * 4 + gap * 3
+        x = VIEWPORT_X + (VIEWPORT_WIDTH - total_w) // 2
+        y = VIEWPORT_Y + pad
+        alive_hives = sum(1 for hive in self.hives if hive.is_alive)
+        spawned_left = self.queued_enemy_count()
+        active_count = len(self.enemies)
+        items = [
+            ("wave", "Wave", self.wave, CYAN),
+            ("target", "State", self.wave_state_text(), UI_WARN if self.wave_delay_active else UI_GOOD),
+            ("target", "Enemies", f"{active_count}+{spawned_left}", UI_BAD),
+            ("energy", "Zoom", f"{int(self.zoom * 100)}%", GENERATOR_BLUE),
+        ]
+        for index, (icon_type, label, value, accent) in enumerate(items):
+            rect = pygame.Rect(x + index * (card_w + gap), y, card_w, card_h)
+            self.draw_metric_card(surface, rect, icon_type, label, value, accent)
+
+        bar_rect = pygame.Rect(x, y + card_h + max(4, scaled(6)), total_w, max(7, scaled(9)))
+        if self.wave_delay_active and self.wave_delay > 0:
+            progress = self.wave_delay_timer / self.wave_delay
+            fill = UI_WARN
+        elif self.wave_active and self.wave_spawn_total > 0:
+            remaining = self.queued_enemy_count() + len(self.enemies)
+            progress = 1 - remaining / max(1, self.wave_spawn_total)
+            fill = UI_GOOD
+        else:
+            progress = 1.0 if alive_hives == 0 else 0.0
+            fill = CYAN
+        draw_progress_bar(surface, bar_rect, progress, fill)
+
+    def draw_pause_overlay(self, surface):
+        overlay = pygame.Surface((VIEWPORT_WIDTH, VIEWPORT_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 105))
+        surface.blit(overlay, (VIEWPORT_X, VIEWPORT_Y))
+        card_w = min(max(260, scaled(360)), VIEWPORT_WIDTH - scaled(60))
+        card_h = max(110, scaled(145))
+        rect = pygame.Rect(0, 0, card_w, card_h)
+        rect.center = (VIEWPORT_X + VIEWPORT_WIDTH // 2, VIEWPORT_Y + VIEWPORT_HEIGHT // 2)
+        draw_card(surface, rect, (22, 28, 38), CYAN, radius=scaled(8))
+        title_rect = pygame.Rect(rect.x + scaled(18), rect.y + scaled(18), rect.w - scaled(36), rect.h // 2)
+        draw_fitted_text(surface, "Paused", title_rect, WHITE, max_size=font_size_large, min_size=24, align="center")
+        state_rect = pygame.Rect(rect.x + scaled(18), rect.y + rect.h // 2, rect.w - scaled(36), rect.h // 3)
+        draw_fitted_text(surface, f"Wave {self.wave} - {len(self.enemies)} enemies alive", state_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=12, align="center")
+
     def draw_notification(self, surface):
         if self.notification_timer <= 0 or not self.notification_text:
             return
-        text = font_medium.render(self.notification_text, True, WHITE)
-        rect = text.get_rect(center=(SCREEN_WIDTH // 2, scaled(95)))
+        text = fitted_text_surface(self.notification_text, WHITE, VIEWPORT_WIDTH - scaled(80), scaled(44), font_size_medium, 14)
+        center_y = VIEWPORT_Y + max(92, scaled(120))
+        rect = text.get_rect(center=(SCREEN_WIDTH // 2, center_y))
         bg = rect.inflate(scaled(34), scaled(18))
-        pygame.draw.rect(surface, PANEL_BG, bg)
-        pygame.draw.rect(surface, CYAN, bg, max(1, scaled(2)))
+        draw_card(surface, bg, (24, 30, 42), CYAN, radius=scaled(6))
         surface.blit(text, rect)
 
     def draw_fog(self, surface):
-        fog = pygame.Surface((FIELD_WIDTH, FIELD_HEIGHT), pygame.SRCALPHA)
-        for x in range(GRID_WIDTH):
-            for y in range(GRID_HEIGHT):
-                if not self.is_revealed((x, y)):
-                    rect = pygame.Rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
-                    pygame.draw.rect(fog, FOG_WHITE + (255,), rect)
-        surface.blit(fog, (FIELD_OFFSET_X, FIELD_OFFSET_Y))
+        if self.fog_dirty:
+            self.fog_surface.fill((0, 0, 0, 0))
+            for x in range(GRID_WIDTH):
+                for y in range(GRID_HEIGHT):
+                    if not self.is_revealed((x, y)):
+                        rect = pygame.Rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+                        pygame.draw.rect(self.fog_surface, FOG_WHITE + (255,), rect)
+            self.fog_dirty = False
+        surface.blit(self.fog_surface, (FIELD_OFFSET_X, FIELD_OFFSET_Y))
 
     def draw_light_outline(self, surface, cells, color=CYAN):
         if not cells:
@@ -1957,6 +2234,26 @@ class Game:
             return
         self.draw_light_outline(surface, self.get_light_coverage(preview_tower), CYAN)
 
+    def draw_build_cell_preview(self, surface):
+        if not self.selected_tower_type:
+            return
+        mouse_pos = pygame.mouse.get_pos()
+        if not self.is_in_viewport(mouse_pos):
+            return
+        cell = cell_from_pos(self.screen_to_world(mouse_pos))
+        if not (0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT):
+            return
+        rect = pygame.Rect(
+            FIELD_OFFSET_X + cell[0] * CELL_SIZE,
+            FIELD_OFFSET_Y + cell[1] * CELL_SIZE,
+            CELL_SIZE,
+            CELL_SIZE,
+        ).inflate(-scaled(3), -scaled(3))
+        can_place = self.can_place_light_building(cell)
+        color = CYAN if can_place else UI_BAD
+        pygame.draw.rect(surface, BLACK, rect.inflate(scaled(4), scaled(4)), max(1, scaled(3)))
+        pygame.draw.rect(surface, color, rect, max(2, scaled(4)))
+
     def draw_world(self, surface):
         surface.fill(GREEN)
 
@@ -1989,6 +2286,7 @@ class Game:
 
         self.hq.draw(surface)
         self.draw_fog(surface)
+        self.draw_build_cell_preview(surface)
         self.draw_light_preview(surface)
 
         if self.selected_tower and self.selected_tower.hp > 0:
@@ -2025,6 +2323,9 @@ class Game:
         if self.paused:
             return
 
+        if self.tower_specialization_pending:
+            return
+
         self.tick_action_cooldowns()
 
         self.hq.update(self)
@@ -2046,10 +2347,13 @@ class Game:
         if self.wave_active and not self.wave_delay_active and self.spawn_queue:
             self.wave_timer += 1
             if self.wave_timer >= 40:
-                e_type, road_key, lane = self.spawn_queue.pop(0)
-                enemy = self.create_wave_enemy(e_type, road_key, lane)
-                if enemy:
-                    self.enemies.append(enemy)
+                spawn_batch = self.spawn_queue.pop(0)
+                if isinstance(spawn_batch, tuple):
+                    spawn_batch = [spawn_batch]
+                for e_type, road_key, lane in spawn_batch:
+                    enemy = self.create_wave_enemy(e_type, road_key, lane)
+                    if enemy:
+                        self.enemies.append(enemy)
                 self.wave_timer = 0
 
         for enemy in self.enemies[:]:
@@ -2073,10 +2377,12 @@ class Game:
                 self.victory = True
 
     def draw_ui(self, surface):
-        pygame.draw.rect(surface, PANEL_BG, (0, 0, SIDE_PANEL_WIDTH, SCREEN_HEIGHT))
-        pygame.draw.rect(surface, PANEL_BG, (SCREEN_WIDTH - SIDE_PANEL_WIDTH, 0, SIDE_PANEL_WIDTH, SCREEN_HEIGHT))
         self.draw_left_panel(surface)
         self.draw_right_panel_context(surface)
+        self.draw_top_status(surface)
+
+        if self.paused:
+            self.draw_pause_overlay(surface)
 
         if self.tower_specialization_pending:
             overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -2088,11 +2394,11 @@ class Game:
             menu_x = (SCREEN_WIDTH - menu_w) // 2
             menu_y = (SCREEN_HEIGHT - menu_h) // 2
             
-            pygame.draw.rect(surface, PANEL_BG, (menu_x, menu_y, menu_w, menu_h))
-            pygame.draw.rect(surface, GOLD, (menu_x, menu_y, menu_w, menu_h), scaled(3))
+            menu_rect = pygame.Rect(menu_x, menu_y, menu_w, menu_h)
+            draw_card(surface, menu_rect, UI_PANEL, GOLD, radius=scaled(8))
             
-            title = font_medium.render("Choose Cannon Specialization", True, WHITE)
-            surface.blit(title, (menu_x + (menu_w - title.get_width()) // 2, menu_y + scaled(20)))
+            title_rect = pygame.Rect(menu_x + scaled(18), menu_y + scaled(16), menu_w - scaled(36), scaled(48))
+            draw_fitted_text(surface, "Choose Cannon Specialization", title_rect, WHITE, max_size=font_size_medium, min_size=16, align="center")
             
             specs = self.get_specialization_options()
             
@@ -2109,20 +2415,19 @@ class Game:
                 by = start_y_menu + row * (btn_h + gap)
                 
                 rect = pygame.Rect(bx, by, btn_w, btn_h)
-                pygame.draw.rect(surface, color, rect)
-                pygame.draw.rect(surface, BLACK, rect, scaled(2))
-                
-                txt = font_small.render(name, True, BLACK)
-                surface.blit(txt, (bx + (btn_w - txt.get_width()) // 2, by + (btn_h - txt.get_height()) // 2))
+                draw_card(surface, rect, color, BLACK, radius=scaled(6))
+                draw_fitted_text(surface, name, rect.inflate(-scaled(12), -scaled(8)), BLACK, max_size=font_size_small, min_size=12, align="center")
 
         if self.victory:
-            txt = font_large.render("VICTORY! All hives destroyed.", True, GOLD)
-            txt_rect = txt.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2))
-            surface.blit(txt, txt_rect)
+            rect = pygame.Rect(0, 0, min(VIEWPORT_WIDTH - scaled(80), scaled(560)), max(100, scaled(130)))
+            rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+            draw_card(surface, rect, (24, 30, 42), GOLD, radius=scaled(8))
+            draw_fitted_text(surface, "VICTORY! All hives destroyed.", rect.inflate(-scaled(24), -scaled(18)), GOLD, max_size=font_size_large, min_size=20, align="center")
         elif self.defeat:
-            txt = font_large.render("DEFEAT", True, RED)
-            txt_rect = txt.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2))
-            surface.blit(txt, txt_rect)
+            rect = pygame.Rect(0, 0, min(VIEWPORT_WIDTH - scaled(80), scaled(420)), max(90, scaled(120)))
+            rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+            draw_card(surface, rect, (42, 24, 30), UI_BAD, radius=scaled(8))
+            draw_fitted_text(surface, "DEFEAT", rect.inflate(-scaled(24), -scaled(18)), UI_BAD, max_size=font_size_large, min_size=24, align="center")
 
         self.draw_notification(surface)
 
@@ -2139,7 +2444,10 @@ while running:
             running = False
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
-                running = False
+                if game.tower_specialization_pending:
+                    game.cancel_tower_specialization()
+                else:
+                    running = False
             if event.key == pygame.K_p:
                 game.toggle_pause()
 
@@ -2162,9 +2470,6 @@ while running:
             pos = pygame.mouse.get_pos()
             if event.button == 2 and game.is_in_viewport(pos):
                 game.begin_camera_drag(pos, event.button)
-                continue
-            if event.button in (4, 5) and game.is_in_viewport(pos):
-                game.zoom_at(pos, 1.12 if event.button == 4 else 1 / 1.12)
                 continue
             if event.button == 3:
                 if game.is_in_viewport(pos):
@@ -2207,6 +2512,8 @@ while running:
                     if rect.collidepoint(pos):
                         game.apply_tower_specialization(spec)
                         break
+                else:
+                    game.cancel_tower_specialization()
                 continue
             
             if pos[0] >= SCREEN_WIDTH - SIDE_PANEL_WIDTH:
@@ -2230,7 +2537,8 @@ while running:
                 if can_start:
                     game.start_wave(early=True)
 
-    game.update_camera()
+    if not game.tower_specialization_pending:
+        game.update_camera()
     game.update()
 
     game.draw_world(world_surface)
