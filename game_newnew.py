@@ -112,7 +112,7 @@ TOWER_UPGRADE_COST = {
 }
 
 STARTING_MONEY = 210
-GENERATOR_INCOME_BY_LEVEL = {1: 5, 2: 9, 3: 18, 4: 36}
+GENERATOR_INCOME_BY_LEVEL = {1: 4.25, 2: 7.65, 3: 15.3, 4: 30.6}
 GENERATOR_TOWER_LIMIT_BY_LEVEL = {1: 6, 2: 10, 3: 13, 4: 16}
 GENERATOR_UPGRADE_COST = {1: 300, 2: 600, 3: 1200}
 ARTILLERY_COST = 400
@@ -125,6 +125,8 @@ TOWER_DISPLAY_NAMES = {
     "beacon": "Observer",
     "cannon": "Cannon",
 }
+CANNON_DAMAGE_MULTIPLIER = 0.9
+CANNON_SPECIALIZATION_SOURCES = {"sniper", "scatter", "gatling"}
 LIGHT_SIZE_BY_LEVEL = {1: 5, 2: 7, 3: 9, 4: 11}
 LAMP_LIGHT_WIDTH = 3
 ACTION_COOLDOWN_FRAMES = {
@@ -607,10 +609,35 @@ class Enemy:
             self.pos[0] += (dx / dist) * move_speed
             self.pos[1] += (dy / dist) * move_speed
 
-    def take_damage(self, damage, damage_type, damage_source=None):
-        effective = damage * (1 - (self.phys_armor if damage_type == "physical" else self.mag_armor))
+    def damage_multiplier_for_source(self, armor, damage_source):
+        if damage_source == "gatling":
+            return max(0.35, 1.25 - armor * 2.5)
+        if damage_source == "scatter":
+            return max(0.55, 1.05 - armor * 1.15)
+        if damage_source == "sniper":
+            return max(0.75, 1.08 - armor * 0.65)
+        return max(0.1, 1 - armor)
+
+    def vulnerability_multiplier_for_source(self, damage_source):
         if damage_source in self.vulnerable_to:
-            effective *= self.vulnerable_to[damage_source]
+            return self.vulnerable_to[damage_source]
+        if damage_source in CANNON_SPECIALIZATION_SOURCES and "cannon" in self.vulnerable_to:
+            cannon_bonus = self.vulnerable_to["cannon"] - 1
+            if damage_source == "gatling":
+                return 1 + cannon_bonus * 0.35
+            if damage_source == "scatter":
+                return 1 + cannon_bonus * 0.65
+            return self.vulnerable_to["cannon"]
+        return 1
+
+    def effective_damage(self, damage, damage_type, damage_source=None):
+        armor = self.phys_armor if damage_type == "physical" else self.mag_armor
+        effective = damage * self.damage_multiplier_for_source(armor, damage_source)
+        effective *= self.vulnerability_multiplier_for_source(damage_source)
+        return max(1, effective)
+
+    def take_damage(self, damage, damage_type, damage_source=None):
+        effective = self.effective_damage(damage, damage_type, damage_source)
         if random.random() < self.evade:
             effective = 0
         self.hp -= effective
@@ -645,7 +672,7 @@ class Tower:
         self.x, self.y = cells_world_center(self.cells)
         self.level = 1
         stats = {
-            "cannon": {"damage": 80, "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": CANNON_BLUE, "hp": 220},
+            "cannon": {"damage": int(80 * CANNON_DAMAGE_MULTIPLIER), "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": CANNON_BLUE, "hp": 220},
             "lamp": {"damage": 0, "range": 0, "cooldown": 0, "color": LIGHT_BLUE, "hp": 105},
             "beacon": {"damage": 0, "range": 0, "cooldown": 0, "color": GENERATOR_BLUE, "hp": 170},
         }
@@ -657,7 +684,7 @@ class Tower:
         self.color = s["color"]
         self.max_hp = s["hp"]
         self.hp = self.max_hp
-        self.laser_beams = []
+        self.shot_effects = []
         self.damage_type = "physical"
         self.splash_radius = scaled(60) if tower_type == "cannon" else 0
         self.splash_damage_multiplier = 0.5
@@ -702,21 +729,21 @@ class Tower:
         level_bonus = 1 + max(0, self.level - 2) * 0.45
         if spec_type == "sniper":
             self.color = (255, 220, 90)
-            self.damage = int(180 * level_bonus)
+            self.damage = int(180 * CANNON_DAMAGE_MULTIPLIER * level_bonus)
             self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
             self.cooldown_max = max(34, int(72 - max(0, self.level - 2) * 8))
             self.splash_radius = 0
             self.splash_damage_multiplier = 0
         elif spec_type == "scatter":
             self.color = (255, 145, 70)
-            self.damage = int(95 * level_bonus)
+            self.damage = int(95 * 0.5 * CANNON_DAMAGE_MULTIPLIER * level_bonus)
             self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
             self.cooldown_max = max(28, int(48 - max(0, self.level - 2) * 6))
             self.splash_radius = scaled(115)
             self.splash_damage_multiplier = 1.0
         elif spec_type == "gatling":
             self.color = (120, 230, 140)
-            self.damage = int(58 * level_bonus)
+            self.damage = int(58 * 0.75 * CANNON_DAMAGE_MULTIPLIER * level_bonus)
             self.range = CELL_SIZE * (16 + max(0, self.level - 2) * 2)
             current_cooldown = (16 - max(0, self.level - 2) * 2) / 2
             self.cooldown_max = max(4, int(round(current_cooldown / 0.75)))
@@ -752,10 +779,12 @@ class Tower:
         return (remaining, self.distance_to_target(target))
 
     def estimated_damage_to(self, target):
-        effective = self.damage * (1 - target.phys_armor)
-        if self.tower_type in target.vulnerable_to:
-            effective *= target.vulnerable_to[self.tower_type]
-        return max(1, effective)
+        return target.effective_damage(self.damage, self.damage_type, self.damage_source())
+
+    def damage_source(self):
+        if self.tower_type == "cannon" and self.specialization:
+            return self.specialization
+        return self.tower_type
 
     def cannon_target_priority(self, target):
         hp = max(1, getattr(target, "hp", 1))
@@ -764,10 +793,10 @@ class Tower:
         return (path_priority[0], shots_to_kill, path_priority[1])
 
     def update(self, enemies, game):
-        for beam in self.laser_beams[:]:
-            beam[4] -= 1
-            if beam[4] <= 0:
-                self.laser_beams.remove(beam)
+        for effect in self.shot_effects[:]:
+            effect["timer"] -= 1
+            if effect["timer"] <= 0:
+                self.shot_effects.remove(effect)
 
         if self.disabled_timer > 0:
             self.disabled_timer -= 1
@@ -784,7 +813,8 @@ class Tower:
 
     def fire_laser(self, target, enemies, game):
         tx, ty = target.pos
-        target.take_damage(self.damage, self.damage_type, self.tower_type)
+        damage_source = self.damage_source()
+        target.take_damage(self.damage, self.damage_type, damage_source)
         splash_damage = int(self.damage * self.splash_damage_multiplier)
         if self.splash_radius > 0 and splash_damage > 0:
             for enemy in enemies:
@@ -792,8 +822,52 @@ class Tower:
                     if self.tower_type == "cannon" and (game is None or not game.is_target_lit(enemy)):
                         continue
                     if math.hypot(enemy.pos[0] - tx, enemy.pos[1] - ty) <= self.splash_radius:
-                        enemy.take_damage(splash_damage, self.damage_type, self.tower_type)
-        self.laser_beams.append([self.x, self.y, tx, ty, 8])
+                        enemy.take_damage(splash_damage, self.damage_type, damage_source)
+        self.add_shot_effect(tx, ty)
+
+    def add_shot_effect(self, tx, ty):
+        shot_color = (255, 232, 72)
+        spec = self.specialization or "sniper"
+        if spec == "scatter":
+            self.shot_effects.append({
+                "kind": "shell",
+                "x1": self.x,
+                "y1": self.y,
+                "x2": tx,
+                "y2": ty,
+                "timer": 18,
+                "duration": 18,
+                "color": shot_color,
+            })
+            return
+
+        if spec == "gatling":
+            dx = tx - self.x
+            dy = ty - self.y
+            distance = max(1, math.hypot(dx, dy))
+            self.shot_effects.append({
+                "kind": "gatling",
+                "x1": self.x,
+                "y1": self.y,
+                "x2": tx,
+                "y2": ty,
+                "segment_len": min(max(scaled(80), distance * 0.24), scaled(180)),
+                "timer": 10,
+                "duration": 10,
+                "color": shot_color,
+            })
+            return
+
+        self.shot_effects.append({
+            "kind": "sniper",
+            "x1": self.x,
+            "y1": self.y,
+            "x2": tx,
+            "y2": ty,
+            "timer": 9,
+            "duration": 9,
+            "color": shot_color,
+        })
 
     def draw(self, surface):
         if self.hp <= 0:
@@ -832,10 +906,33 @@ class Tower:
                 pygame.draw.line(surface, RED, rect.topleft, rect.bottomright, max(2, scaled(3)))
                 pygame.draw.line(surface, RED, rect.topright, rect.bottomleft, max(2, scaled(3)))
 
-        for x1, y1, x2, y2, timer in self.laser_beams:
-            width = max(2, scaled(5))
-            pygame.draw.line(surface, (255, 245, 170), (x1, y1), (x2, y2), width)
-            pygame.draw.line(surface, RED, (x1, y1), (x2, y2), max(1, width // 2))
+        for effect in self.shot_effects:
+            color = effect["color"]
+            if effect["kind"] == "shell":
+                progress = 1 - effect["timer"] / effect["duration"]
+                x = effect["x1"] + (effect["x2"] - effect["x1"]) * progress
+                y = effect["y1"] + (effect["y2"] - effect["y1"]) * progress
+                size = max(7, scaled(12))
+                rect = pygame.Rect(int(x - size / 2), int(y - size / 2), size, size)
+                pygame.draw.rect(surface, BLACK, rect.inflate(max(2, scaled(3)), max(2, scaled(3))))
+                pygame.draw.rect(surface, color, rect)
+            else:
+                width = max(2, scaled(4 if effect["kind"] == "gatling" else 5))
+                start = (effect["x1"], effect["y1"])
+                end = (effect["x2"], effect["y2"])
+                if effect["kind"] == "gatling":
+                    dx = effect["x2"] - effect["x1"]
+                    dy = effect["y2"] - effect["y1"]
+                    distance = max(1, math.hypot(dx, dy))
+                    nx = dx / distance
+                    ny = dy / distance
+                    progress = 1 - effect["timer"] / effect["duration"]
+                    head = min(distance, progress * distance)
+                    tail = max(0, head - effect["segment_len"])
+                    start = (effect["x1"] + nx * tail, effect["y1"] + ny * tail)
+                    end = (effect["x1"] + nx * head, effect["y1"] + ny * head)
+                pygame.draw.line(surface, BLACK, start, end, width + max(1, scaled(2)))
+                pygame.draw.line(surface, color, start, end, width)
 
 class Hive:
     def __init__(self, road_key):
@@ -929,6 +1026,7 @@ class Headquarters:
             income = int(self.income_buffer)
             self.income_buffer -= income
             game.money += income
+            game.light_earned += income
 
     def draw(self, surface):
         if self.hp <= 0:
@@ -972,11 +1070,15 @@ class Game:
         self.victory = False
         self.defeat = False
         self.paused = False
+        self.exit_confirm_open = False
         self.hq = Headquarters()
         self.hives = [Hive(road_key) for road_key in ROAD_KEYS]
         self.bonuses = self.generate_bonuses()
         self.notification_text = ""
         self.notification_timer = 0
+        self.enemies_killed = 0
+        self.light_earned = 0
+        self.bonuses_collected = 0
         
         self.first_wave_started = False
         
@@ -1046,7 +1148,7 @@ class Game:
         self.dragging_camera = True
         self.last_drag_pos = pos
         self.drag_start_pos = pos
-        self.drag_moved = button == 2
+        self.drag_moved = False
         self.camera_drag_button = button
 
     def update_camera_drag(self, event):
@@ -1064,7 +1166,7 @@ class Game:
     def end_camera_drag(self, button):
         if not self.dragging_camera or self.camera_drag_button != button:
             return False
-        should_click = button == 1 and not self.drag_moved
+        should_click = button == 3 and not self.drag_moved
         self.dragging_camera = False
         self.last_drag_pos = None
         self.drag_start_pos = None
@@ -1073,35 +1175,7 @@ class Game:
         return should_click
 
     def update_camera(self):
-        if self.dragging_camera:
-            return
-        keys = pygame.key.get_pressed()
-        mouse_x, mouse_y = pygame.mouse.get_pos()
-        speed = max(12, CELL_SIZE * 0.65) / self.zoom
-        dx = 0
-        dy = 0
-
-        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-            dx -= speed
-        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-            dx += speed
-        if keys[pygame.K_w] or keys[pygame.K_UP]:
-            dy -= speed
-        if keys[pygame.K_s] or keys[pygame.K_DOWN]:
-            dy += speed
-
-        if self.is_in_viewport((mouse_x, mouse_y)):
-            if mouse_x <= VIEWPORT_X + EDGE_SCROLL_SIZE:
-                dx -= speed
-            elif mouse_x >= VIEWPORT_X + VIEWPORT_WIDTH - EDGE_SCROLL_SIZE:
-                dx += speed
-            if mouse_y <= VIEWPORT_Y + EDGE_SCROLL_SIZE:
-                dy -= speed
-            elif mouse_y >= VIEWPORT_Y + VIEWPORT_HEIGHT - EDGE_SCROLL_SIZE:
-                dy += speed
-
-        if dx or dy:
-            self.pan_camera(dx, dy)
+        return
 
     def get_castle_light_zone(self):
         cells = set(CASTLE_LIGHT_ZONE)
@@ -1124,8 +1198,22 @@ class Game:
     def is_start_screen(self):
         return self.screen_state == "start"
 
+    def ask_exit_to_menu(self):
+        if self.screen_state != "playing":
+            return False
+        self.exit_confirm_open = True
+        self.dragging_camera = False
+        self.last_drag_pos = None
+        self.drag_start_pos = None
+        self.drag_moved = False
+        self.camera_drag_button = None
+        return True
+
+    def cancel_exit_confirm(self):
+        self.exit_confirm_open = False
+
     def toggle_pause(self):
-        if self.screen_state != "playing" or self.defeat or self.victory:
+        if self.screen_state != "playing" or self.exit_confirm_open or self.defeat or self.victory:
             return False
         self.paused = not self.paused
         self.notify("Paused" if self.paused else "Resumed")
@@ -1180,6 +1268,7 @@ class Game:
             return False
         if bonus.bonus_type == "currency":
             self.money += 100
+            self.light_earned += 100
             self.notify("+100 light found")
         elif bonus.bonus_type == "broken_cannon":
             tower = Tower("cannon", bonus.cell, fixed=True)
@@ -1188,6 +1277,7 @@ class Game:
             self.towers.append(tower)
             self.notify("Broken cannon found")
         bonus.is_collected = True
+        self.bonuses_collected += 1
         return True
 
     def get_lane_light_pressure(self, lane, start_index):
@@ -1491,6 +1581,7 @@ class Game:
         if not self.wave_active and not self.wave_delay_active and any(hive.is_alive for hive in self.hives):
             if early and self.first_wave_started:
                 self.money += 22
+                self.light_earned += 22
             
             if not self.first_wave_started:
                 self.first_wave_started = True
@@ -1736,7 +1827,7 @@ class Game:
         pause_button = self.get_pause_button()
         return {
             "title": "Menu",
-            "enabled": True,
+            "enabled": self.paused,
             "selected": False,
             "rect": pygame.Rect(
                 sizes["pad"],
@@ -1875,8 +1966,9 @@ class Game:
             return True
 
         menu_button = self.get_menu_button()
-        if menu_button["rect"].collidepoint(pos):
-            return "menu"
+        if self.paused and menu_button["rect"].collidepoint(pos):
+            self.ask_exit_to_menu()
+            return True
 
         for button in self.get_left_build_buttons():
             if button["rect"].collidepoint(pos):
@@ -1921,6 +2013,18 @@ class Game:
             self.selected_tower = None
             self.selected_hive = None
         return True
+
+    def handle_world_right_click(self, pos):
+        if self.is_in_viewport(pos):
+            cell = cell_from_pos(self.screen_to_world(pos))
+            if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
+                if self.sell_tower(cell):
+                    self.notify("Tower sold")
+                    return True
+        self.selected_tower_type = None
+        self.selected_tower = None
+        self.selected_hive = None
+        return False
 
     def draw_energy_icon(self, surface, center, size):
         x, y = center
@@ -2049,15 +2153,16 @@ class Game:
             pause_button["selected"],
         )
 
-        menu_button = self.get_menu_button()
-        self.draw_panel_button(
-            surface,
-            menu_button["rect"],
-            menu_button["title"],
-            None,
-            menu_button["enabled"],
-            menu_button["selected"],
-        )
+        if self.paused:
+            menu_button = self.get_menu_button()
+            self.draw_panel_button(
+                surface,
+                menu_button["rect"],
+                menu_button["title"],
+                None,
+                menu_button["enabled"],
+                menu_button["selected"],
+            )
 
         build_buttons = self.get_left_build_buttons()
         if build_buttons:
@@ -2240,34 +2345,84 @@ class Game:
 
     def get_game_over_layout(self):
         card_w = min(max(360, scaled(560)), SCREEN_WIDTH - scaled(80))
-        card_h = max(260, scaled(320))
+        card_h = max(220, scaled(270))
         card_rect = pygame.Rect(0, 0, card_w, card_h)
-        card_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+        card_rect.center = (SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.40))
 
         gap = max(14, scaled(18))
-        button_w = min(max(150, scaled(205)), (card_w - gap * 3) // 2)
+        button_w = min(max(170, scaled(230)), card_w - scaled(70))
         button_h = max(54, scaled(68))
         button_y = card_rect.bottom - scaled(34) - button_h
-        play_rect = pygame.Rect(card_rect.centerx - button_w - gap // 2, button_y, button_w, button_h)
-        menu_rect = pygame.Rect(card_rect.centerx + gap // 2, button_y, button_w, button_h)
-        return card_rect, play_rect, menu_rect
+        play_rect = pygame.Rect(card_rect.centerx - button_w // 2, button_y, button_w, button_h)
+
+        summary_w = min(max(640, scaled(920)), SCREEN_WIDTH - scaled(60))
+        summary_h = max(118, scaled(140))
+        summary_rect = pygame.Rect(0, 0, summary_w, summary_h)
+        summary_rect.midbottom = (SCREEN_WIDTH // 2, SCREEN_HEIGHT - scaled(28))
+
+        menu_w = min(max(150, scaled(190)), summary_w // 4)
+        menu_h = max(54, scaled(66))
+        pad = max(12, scaled(18))
+        menu_rect = pygame.Rect(
+            summary_rect.right - pad - menu_w,
+            summary_rect.y + (summary_rect.h - menu_h) // 2,
+            menu_w,
+            menu_h,
+        )
+        return card_rect, play_rect, summary_rect, menu_rect
 
     def handle_game_over_click(self, pos):
         if not (self.victory or self.defeat):
             return None
-        _, play_rect, menu_rect = self.get_game_over_layout()
+        _, play_rect, _, menu_rect = self.get_game_over_layout()
         if play_rect.collidepoint(pos):
             return "play_again"
         if menu_rect.collidepoint(pos):
             return "menu"
         return None
 
+    def get_match_summary_items(self):
+        total_hives = len(self.hives)
+        destroyed_hives = sum(1 for hive in self.hives if not hive.is_alive)
+        completed_wave = max(1, self.wave - 1) if self.victory else self.wave
+        return [
+            ("Wave", completed_wave),
+            ("Kills", self.enemies_killed),
+            ("Hives", f"{destroyed_hives}/{total_hives}"),
+            ("Light", int(self.light_earned)),
+            ("Bonuses", self.bonuses_collected),
+        ]
+
+    def draw_match_summary_panel(self, surface, summary_rect, menu_rect):
+        draw_card(surface, summary_rect, (20, 25, 34), UI_STROKE, radius=scaled(8))
+        pad = max(12, scaled(18))
+        gap = max(8, scaled(10))
+        title_h = max(26, scaled(32))
+        title_rect = pygame.Rect(summary_rect.x + pad, summary_rect.y + scaled(10), menu_rect.x - summary_rect.x - pad * 2, title_h)
+        draw_fitted_text(surface, "Run Summary", title_rect, WHITE, max_size=font_size_small, min_size=14)
+
+        stats = self.get_match_summary_items()
+        stats_x = summary_rect.x + pad
+        stats_y = title_rect.bottom + max(5, scaled(6))
+        stats_w = menu_rect.x - stats_x - pad
+        stats_h = summary_rect.bottom - stats_y - pad
+        card_w = max(64, (stats_w - gap * (len(stats) - 1)) // len(stats))
+        for index, (label, value) in enumerate(stats):
+            rect = pygame.Rect(stats_x + index * (card_w + gap), stats_y, card_w, stats_h)
+            draw_card(surface, rect, (30, 38, 51), (62, 78, 96), radius=scaled(5))
+            label_rect = pygame.Rect(rect.x + scaled(8), rect.y + scaled(4), rect.w - scaled(16), rect.h // 2)
+            value_rect = pygame.Rect(rect.x + scaled(8), rect.y + rect.h // 2 - scaled(2), rect.w - scaled(16), rect.h // 2)
+            draw_fitted_text(surface, label, label_rect, UI_TEXT_DIM, max_size=font_size_small - 4, min_size=10, align="center")
+            draw_fitted_text(surface, value, value_rect, WHITE, max_size=font_size_small, min_size=12, align="center")
+
+        self.draw_menu_action_button(surface, menu_rect, "Menu", (44, 56, 76), CYAN)
+
     def draw_game_over_overlay(self, surface):
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 170))
         surface.blit(overlay, (0, 0))
 
-        card_rect, play_rect, menu_rect = self.get_game_over_layout()
+        card_rect, play_rect, summary_rect, menu_rect = self.get_game_over_layout()
         accent = GOLD if self.victory else UI_BAD
         fill = (24, 30, 42) if self.victory else (42, 24, 30)
         title = "VICTORY!" if self.victory else "DEFEAT"
@@ -2280,7 +2435,47 @@ class Game:
         draw_fitted_text(surface, detail, detail_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
 
         self.draw_menu_action_button(surface, play_rect, "Play Again", (48, 84, 66), UI_GOOD)
-        self.draw_menu_action_button(surface, menu_rect, "Menu", (44, 56, 76), CYAN)
+        self.draw_match_summary_panel(surface, summary_rect, menu_rect)
+
+    def get_exit_confirm_layout(self):
+        card_w = min(max(350, scaled(520)), SCREEN_WIDTH - scaled(80))
+        card_h = max(220, scaled(260))
+        card_rect = pygame.Rect(0, 0, card_w, card_h)
+        card_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+
+        gap = max(14, scaled(18))
+        button_w = min(max(130, scaled(175)), (card_w - gap * 3) // 2)
+        button_h = max(52, scaled(64))
+        button_y = card_rect.bottom - scaled(30) - button_h
+        yes_rect = pygame.Rect(card_rect.centerx - button_w - gap // 2, button_y, button_w, button_h)
+        no_rect = pygame.Rect(card_rect.centerx + gap // 2, button_y, button_w, button_h)
+        return card_rect, yes_rect, no_rect
+
+    def handle_exit_confirm_click(self, pos):
+        if not self.exit_confirm_open:
+            return None
+        _, yes_rect, no_rect = self.get_exit_confirm_layout()
+        if yes_rect.collidepoint(pos):
+            return "menu"
+        if no_rect.collidepoint(pos):
+            self.cancel_exit_confirm()
+            return "cancel"
+        return None
+
+    def draw_exit_confirm_overlay(self, surface):
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 150))
+        surface.blit(overlay, (0, 0))
+
+        card_rect, yes_rect, no_rect = self.get_exit_confirm_layout()
+        draw_card(surface, card_rect, (24, 30, 42), UI_WARN, radius=scaled(8))
+        title_rect = pygame.Rect(card_rect.x + scaled(24), card_rect.y + scaled(28), card_rect.w - scaled(48), max(58, scaled(74)))
+        draw_fitted_text(surface, "Exit to menu?", title_rect, UI_WARN, max_size=font_size_medium, min_size=18, align="center")
+        detail_rect = pygame.Rect(card_rect.x + scaled(32), title_rect.bottom, card_rect.w - scaled(64), max(42, scaled(56)))
+        draw_fitted_text(surface, "Current run will be lost.", detail_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
+
+        self.draw_menu_action_button(surface, yes_rect, "Yes", (130, 48, 54), UI_BAD)
+        self.draw_menu_action_button(surface, no_rect, "No", (48, 84, 66), UI_GOOD)
 
     def draw_notification(self, surface):
         if self.notification_timer <= 0 or not self.notification_text:
@@ -2439,6 +2634,9 @@ class Game:
         if self.screen_state != "playing":
             return
 
+        if self.exit_confirm_open:
+            return
+
         if self.defeat or self.victory:
             return
 
@@ -2486,6 +2684,8 @@ class Game:
             if not enemy.alive:
                 if enemy.hp <= 0:
                     self.money += enemy.reward
+                    self.light_earned += enemy.reward
+                    self.enemies_killed += 1
                 self.enemies.remove(enemy)
 
         self.update_dimmers()
@@ -2545,6 +2745,8 @@ class Game:
 
         if self.victory or self.defeat:
             self.draw_game_over_overlay(surface)
+        elif self.exit_confirm_open:
+            self.draw_exit_confirm_overlay(surface)
 
         self.draw_notification(surface)
 
@@ -2572,6 +2774,12 @@ while running:
                 elif event.key == pygame.K_ESCAPE:
                     game = Game(show_start=True)
                 continue
+            if game.exit_confirm_open:
+                if event.key in (pygame.K_RETURN, pygame.K_y):
+                    game = Game(show_start=True)
+                elif event.key in (pygame.K_ESCAPE, pygame.K_n):
+                    game.cancel_exit_confirm()
+                continue
             if event.key == pygame.K_ESCAPE:
                 if game.tower_specialization_pending:
                     game.cancel_tower_specialization()
@@ -2590,37 +2798,36 @@ while running:
                     game = Game(show_start=True)
             continue
 
+        if game.exit_confirm_open:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                pos = pygame.mouse.get_pos()
+                action = game.handle_exit_confirm_click(pos)
+                if action == "menu":
+                    game = Game(show_start=True)
+            continue
+
         if event.type == pygame.MOUSEWHEEL:
             pos = pygame.mouse.get_pos()
             if game.is_in_viewport(pos):
                 game.zoom_at(pos, 1.12 ** event.y)
 
         if event.type == pygame.MOUSEBUTTONUP:
-            if event.button in (1, 2):
+            if event.button == 3:
                 pos = getattr(event, "pos", pygame.mouse.get_pos())
                 should_handle_click = game.end_camera_drag(event.button)
                 if should_handle_click:
-                    game.handle_world_left_click(pos)
+                    game.handle_world_right_click(pos)
 
         if event.type == pygame.MOUSEMOTION and game.dragging_camera:
             game.update_camera_drag(event)
 
         if event.type == pygame.MOUSEBUTTONDOWN:
             pos = pygame.mouse.get_pos()
-            if event.button == 2 and game.is_in_viewport(pos):
+            if event.button == 3 and game.is_in_viewport(pos):
                 game.begin_camera_drag(pos, event.button)
                 continue
             if event.button == 3:
-                if game.is_in_viewport(pos):
-                    cell = cell_from_pos(game.screen_to_world(pos))
-                    if 0 <= cell[0] < GRID_WIDTH and 0 <= cell[1] < GRID_HEIGHT:
-                        if game.sell_tower(cell):
-                            game.notify("Tower sold")
-                        else:
-                            game.selected_tower_type = None
-                            game.selected_tower = None
-                            game.selected_hive = None
-                else:
+                if not game.is_in_viewport(pos):
                     game.selected_tower_type = None
                     game.selected_tower = None
                     game.selected_hive = None
@@ -2658,11 +2865,9 @@ while running:
             if pos[0] >= SCREEN_WIDTH - SIDE_PANEL_WIDTH:
                 game.handle_right_panel_click(pos)
             elif pos[0] < SIDE_PANEL_WIDTH:
-                action = game.handle_left_panel_click(pos)
-                if action == "menu":
-                    game = Game(show_start=True)
+                game.handle_left_panel_click(pos)
             elif game.is_in_viewport(pos):
-                game.begin_camera_drag(pos, event.button)
+                game.handle_world_left_click(pos)
 
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_u:
@@ -2681,7 +2886,7 @@ while running:
     if game.is_start_screen():
         game.draw_start_screen(screen)
     else:
-        if not game.tower_specialization_pending and not game.victory and not game.defeat:
+        if not game.exit_confirm_open and not game.tower_specialization_pending and not game.victory and not game.defeat:
             game.update_camera()
         game.update()
 
