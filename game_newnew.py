@@ -95,6 +95,7 @@ FIELD_OFFSET_X = 0
 FIELD_OFFSET_Y = 0
 FIELD_WIDTH = CELL_SIZE * GRID_WIDTH
 FIELD_HEIGHT = CELL_SIZE * GRID_HEIGHT
+FULL_MAP_ATTACK_RANGE = math.hypot(FIELD_WIDTH, FIELD_HEIGHT) + CELL_SIZE
 MIN_ZOOM = max(VIEWPORT_WIDTH / FIELD_WIDTH, VIEWPORT_HEIGHT / FIELD_HEIGHT)
 MAX_ZOOM = 1.9
 START_ZOOM = min(MAX_ZOOM, max(MIN_ZOOM, 0.85))
@@ -126,13 +127,15 @@ TOWER_DISPLAY_NAMES = {
     "cannon": "Cannon",
 }
 CANNON_DAMAGE_MULTIPLIER = 0.9
+CANNON_LEVEL_DAMAGE_BONUS = 0.05
 CANNON_SPECIALIZATION_SOURCES = {"sniper", "scatter", "gatling"}
 LIGHT_SIZE_BY_LEVEL = {1: 5, 2: 7, 3: 9, 4: 11}
 LAMP_LIGHT_WIDTH = 3
 ACTION_COOLDOWN_FRAMES = {
     "build": 18,
-    "rotate": 12,
+    "rotate": 60,
     "sell": 20,
+    "change_specialization": 150,
 }
 DIRECTIONS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 ROTATABLE_LIGHT_TYPES = {"lamp"}
@@ -451,8 +454,51 @@ def draw_fitted_text(surface, text, rect, color=WHITE, max_size=None, min_size=1
         y = rect.bottom - rendered.get_height()
     else:
         y = rect.centery - rendered.get_height() // 2
+    old_clip = surface.get_clip()
+    surface.set_clip(rect.clip(surface.get_rect()))
     surface.blit(rendered, (x, y))
+    surface.set_clip(old_clip)
     return rendered
+
+def draw_multiline_text(surface, text, rect, color=WHITE, max_size=None, min_size=12, align="center"):
+    lines = str(text).splitlines() or [""]
+    max_size = int(max_size or font_size_small)
+    min_size = max(10, int(min_size))
+    chosen = None
+    for size in range(max_size, min_size - 1, -2):
+        font = ui_font(size)
+        rendered = [font.render(line, True, color) for line in lines]
+        line_gap = max(2, size // 7)
+        total_h = sum(line.get_height() for line in rendered) + line_gap * max(0, len(rendered) - 1)
+        max_w = max((line.get_width() for line in rendered), default=0)
+        if total_h <= rect.h and max_w <= rect.w:
+            chosen = (rendered, line_gap, total_h)
+            break
+    if chosen is None:
+        font = ui_font(min_size)
+        rendered = [font.render(line, True, color) for line in lines]
+        line_gap = max(2, min_size // 7)
+        total_h = sum(line.get_height() for line in rendered) + line_gap * max(0, len(rendered) - 1)
+        chosen = (rendered, line_gap, total_h)
+
+    rendered, line_gap, total_h = chosen
+    y = rect.centery - total_h // 2
+    if total_h > rect.h:
+        y = rect.y
+    else:
+        y = max(rect.y, min(y, rect.bottom - total_h))
+    old_clip = surface.get_clip()
+    surface.set_clip(rect.clip(surface.get_rect()))
+    for line in rendered:
+        if align == "center":
+            x = rect.centerx - line.get_width() // 2
+        elif align == "right":
+            x = rect.right - line.get_width()
+        else:
+            x = rect.x
+        surface.blit(line, (x, y))
+        y += line.get_height() + line_gap
+    surface.set_clip(old_clip)
 
 def draw_card(surface, rect, fill=UI_CARD, stroke=UI_STROKE, radius=None):
     radius = scaled(6) if radius is None else radius
@@ -615,7 +661,7 @@ class Enemy:
         if damage_source == "scatter":
             return max(0.55, 1.05 - armor * 1.15)
         if damage_source == "sniper":
-            return max(0.75, 1.08 - armor * 0.65)
+            return 1.08 + max(0, armor) * 0.8
         return max(0.1, 1 - armor)
 
     def vulnerability_multiplier_for_source(self, damage_source):
@@ -672,7 +718,7 @@ class Tower:
         self.x, self.y = cells_world_center(self.cells)
         self.level = 1
         stats = {
-            "cannon": {"damage": int(80 * CANNON_DAMAGE_MULTIPLIER), "range": CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2, "cooldown": 52, "color": CANNON_BLUE, "hp": 220},
+            "cannon": {"damage": int(80 * CANNON_DAMAGE_MULTIPLIER), "range": FULL_MAP_ATTACK_RANGE, "cooldown": 52, "color": CANNON_BLUE, "hp": 220},
             "lamp": {"damage": 0, "range": 0, "cooldown": 0, "color": LIGHT_BLUE, "hp": 105},
             "beacon": {"damage": 0, "range": 0, "cooldown": 0, "color": GENERATOR_BLUE, "hp": 170},
         }
@@ -726,25 +772,25 @@ class Tower:
         if self.tower_type != "cannon":
             return
         self.specialization = spec_type
-        level_bonus = 1 + max(0, self.level - 2) * 0.45
+        level_bonus = 1 + max(0, self.level - 1) * CANNON_LEVEL_DAMAGE_BONUS
         if spec_type == "sniper":
             self.color = (255, 220, 90)
             self.damage = int(180 * CANNON_DAMAGE_MULTIPLIER * level_bonus)
-            self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
+            self.range = FULL_MAP_ATTACK_RANGE
             self.cooldown_max = max(34, int(72 - max(0, self.level - 2) * 8))
             self.splash_radius = 0
             self.splash_damage_multiplier = 0
         elif spec_type == "scatter":
             self.color = (255, 145, 70)
             self.damage = int(95 * 0.5 * CANNON_DAMAGE_MULTIPLIER * level_bonus)
-            self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
+            self.range = FULL_MAP_ATTACK_RANGE
             self.cooldown_max = max(28, int(48 - max(0, self.level - 2) * 6))
             self.splash_radius = scaled(115)
             self.splash_damage_multiplier = 1.0
         elif spec_type == "gatling":
             self.color = (120, 230, 140)
             self.damage = int(58 * 0.75 * CANNON_DAMAGE_MULTIPLIER * level_bonus)
-            self.range = CELL_SIZE * (16 + max(0, self.level - 2) * 2)
+            self.range = FULL_MAP_ATTACK_RANGE
             current_cooldown = (16 - max(0, self.level - 2) * 2) / 2
             self.cooldown_max = max(4, int(round(current_cooldown / 0.75)))
             self.splash_radius = 0
@@ -858,14 +904,18 @@ class Tower:
             })
             return
 
+        dx = tx - self.x
+        dy = ty - self.y
+        distance = max(1, math.hypot(dx, dy))
         self.shot_effects.append({
             "kind": "sniper",
             "x1": self.x,
             "y1": self.y,
             "x2": tx,
             "y2": ty,
-            "timer": 9,
-            "duration": 9,
+            "segment_len": min(max(scaled(110), distance * 0.32), scaled(260)),
+            "timer": 10,
+            "duration": 10,
             "color": shot_color,
         })
 
@@ -920,7 +970,7 @@ class Tower:
                 width = max(2, scaled(4 if effect["kind"] == "gatling" else 5))
                 start = (effect["x1"], effect["y1"])
                 end = (effect["x2"], effect["y2"])
-                if effect["kind"] == "gatling":
+                if effect["kind"] in ("gatling", "sniper"):
                     dx = effect["x2"] - effect["x1"]
                     dy = effect["y2"] - effect["y1"]
                     distance = max(1, math.hypot(dx, dy))
@@ -1197,6 +1247,9 @@ class Game:
 
     def is_start_screen(self):
         return self.screen_state == "start"
+
+    def is_tutorial_screen(self):
+        return self.screen_state == "tutorial"
 
     def ask_exit_to_menu(self):
         if self.screen_state != "playing":
@@ -1573,6 +1626,12 @@ class Game:
     def can_use_action(self, action):
         return self.action_cooldowns.get(action, 0) <= 0
 
+    def cooldown_button_title(self, title, action):
+        frames_left = self.action_cooldowns.get(action, 0)
+        if frames_left <= 0:
+            return title
+        return f"{title} {math.ceil(frames_left / 60)}s"
+
     def start_action_cooldown(self, action):
         if action in ACTION_COOLDOWN_FRAMES:
             self.action_cooldowns[action] = ACTION_COOLDOWN_FRAMES[action]
@@ -1659,6 +1718,8 @@ class Game:
                 and self.tower_to_specialize.specialization is not None
             )
             if is_free_change:
+                if self.tower_to_specialize.specialization != spec_type:
+                    self.start_action_cooldown("change_specialization")
                 self.tower_to_specialize.apply_specialization(spec_type)
                 self.tower_specialization_pending = False
                 self.tower_to_specialize = None
@@ -1690,6 +1751,7 @@ class Game:
             and self.selected_tower.tower_type == "cannon"
             and self.selected_tower.level >= 3
             and self.selected_tower.specialization
+            and self.can_use_action("change_specialization")
         ):
             self.tower_specialization_pending = True
             self.tower_to_specialize = self.selected_tower
@@ -1867,7 +1929,7 @@ class Game:
             if self.selected_tower.tower_type in ROTATABLE_LIGHT_TYPES:
                 buttons.append({
                     "action": "rotate_tower",
-                    "title": "Rotate",
+                    "title": self.cooldown_button_title("Rotate", "rotate"),
                     "cost": None,
                     "enabled": self.can_use_action("rotate"),
                     "selected": False,
@@ -1880,9 +1942,9 @@ class Game:
             ):
                 buttons.append({
                     "action": "change_specialization",
-                    "title": "Change",
+                    "title": self.cooldown_button_title("Change", "change_specialization"),
                     "cost": None,
-                    "enabled": True,
+                    "enabled": self.can_use_action("change_specialization"),
                     "selected": False,
                 })
 
@@ -2257,10 +2319,65 @@ class Game:
 
     def get_specialization_options(self):
         return [
-            ("Sniper", (255, 220, 90), "sniper"),
-            ("Scatter", (255, 145, 70), "scatter"),
-            ("Gatling", (120, 230, 140), "gatling"),
+            ("Sniper", "Powerful gun\nwith solid\ndamage", (255, 220, 90), "sniper"),
+            ("Howitzer", "High explosive\ndelivery into\nthe area", (255, 145, 70), "scatter"),
+            ("Gatling", "Fast-shot\ncannon for\nsteady fire", (120, 230, 140), "gatling"),
         ]
+
+    def get_specialization_layout(self):
+        menu_w = min(max(540, scaled(680)), SCREEN_WIDTH - scaled(80))
+        menu_h = max(230, scaled(290))
+        menu_rect = pygame.Rect(0, 0, menu_w, menu_h)
+        menu_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+
+        pad = max(22, scaled(30))
+        gap = max(18, scaled(24))
+        title_h = max(42, scaled(54))
+        card_h = menu_h - pad * 2 - title_h - scaled(18)
+        card_w = (menu_w - pad * 2 - gap * 2) // 3
+        card_y = menu_rect.y + pad + title_h + scaled(12)
+        card_rects = [
+            pygame.Rect(menu_rect.x + pad + index * (card_w + gap), card_y, card_w, card_h)
+            for index in range(3)
+        ]
+        return menu_rect, card_rects
+
+    def handle_specialization_click(self, pos):
+        menu_rect, card_rects = self.get_specialization_layout()
+        for rect, (_, _, _, spec) in zip(card_rects, self.get_specialization_options()):
+            if rect.collidepoint(pos):
+                self.apply_tower_specialization(spec)
+                return True
+        if not menu_rect.collidepoint(pos):
+            self.cancel_tower_specialization()
+            return True
+        return False
+
+    def draw_specialization_modal(self, surface):
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 155))
+        surface.blit(overlay, (0, 0))
+
+        menu_rect, card_rects = self.get_specialization_layout()
+        draw_card(surface, menu_rect, (27, 28, 31), (56, 60, 66), radius=scaled(10))
+        title_rect = pygame.Rect(menu_rect.x + scaled(24), menu_rect.y + scaled(18), menu_rect.w - scaled(48), max(42, scaled(54)))
+        draw_fitted_text(surface, "Choose modification", title_rect, WHITE, max_size=font_size_medium, min_size=18, align="center")
+
+        current_spec = self.tower_to_specialize.specialization if self.tower_to_specialize else None
+        for rect, (name, description, accent, spec) in zip(card_rects, self.get_specialization_options()):
+            selected = spec == current_spec
+            fill = (34, 36, 41) if selected else (27, 28, 31)
+            stroke = CYAN if selected else (27, 28, 31)
+            draw_card(surface, rect, fill, stroke, radius=scaled(10))
+
+            name_rect = pygame.Rect(rect.x + scaled(10), rect.y + scaled(14), rect.w - scaled(20), max(30, scaled(38)))
+            draw_fitted_text(surface, name, name_rect, WHITE, max_size=font_size_small, min_size=14, align="center")
+
+            desc_rect = pygame.Rect(rect.x + scaled(12), name_rect.bottom + scaled(8), rect.w - scaled(24), rect.bottom - name_rect.bottom - scaled(20))
+            draw_multiline_text(surface, description, desc_rect, UI_TEXT_DIM, max_size=font_size_small - 4, min_size=11, align="center")
+
+            if selected:
+                pygame.draw.rect(surface, accent, rect, max(2, scaled(3)), border_radius=scaled(10))
 
     def draw_top_status(self, surface):
         pad = max(10, scaled(14))
@@ -2316,16 +2433,26 @@ class Game:
         label_rect = rect.inflate(-scaled(18), -scaled(10))
         draw_fitted_text(surface, title, label_rect, WHITE, max_size=font_size_medium, min_size=16, align="center")
 
-    def get_start_button_rect(self):
+    def get_start_buttons(self):
         button_w = min(max(260, scaled(340)), SCREEN_WIDTH - scaled(80))
         button_h = max(58, scaled(72))
-        rect = pygame.Rect(0, 0, button_w, button_h)
-        rect.center = (SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.62))
-        return rect
+        gap = max(14, scaled(18))
+        play_rect = pygame.Rect(0, 0, button_w, button_h)
+        tutorial_rect = pygame.Rect(0, 0, button_w, button_h)
+        play_rect.center = (SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.58))
+        tutorial_rect.center = (SCREEN_WIDTH // 2, play_rect.centery + button_h + gap)
+        return {
+            "play": play_rect,
+            "tutorial": tutorial_rect,
+        }
+
+    def get_start_button_rect(self):
+        return self.get_start_buttons()["play"]
 
     def handle_start_click(self, pos):
-        if self.get_start_button_rect().collidepoint(pos):
-            return "play"
+        for action, rect in self.get_start_buttons().items():
+            if rect.collidepoint(pos):
+                return action
         return None
 
     def draw_start_screen(self, surface):
@@ -2337,48 +2464,130 @@ class Game:
         for y in range(0, SCREEN_HEIGHT + step, step):
             pygame.draw.line(surface, (14, 22, 32), (0, y), (SCREEN_WIDTH, y), max(1, scaled(1)))
 
-        title_rect = pygame.Rect(scaled(40), int(SCREEN_HEIGHT * 0.25), SCREEN_WIDTH - scaled(80), max(86, scaled(126)))
+        title_rect = pygame.Rect(scaled(40), int(SCREEN_HEIGHT * 0.20), SCREEN_WIDTH - scaled(80), max(86, scaled(126)))
         draw_fitted_text(surface, GAME_TITLE, title_rect, GOLD, max_size=max(font_size_large, scaled(118)), min_size=28, align="center")
 
-        button_rect = self.get_start_button_rect()
-        self.draw_menu_action_button(surface, button_rect, "Play", (48, 84, 66), UI_GOOD)
+        subtitle_rect = pygame.Rect(scaled(60), title_rect.bottom + scaled(8), SCREEN_WIDTH - scaled(120), max(34, scaled(44)))
+        draw_fitted_text(surface, "Light the roads. Hold the hives back. Keep the Generator alive.", subtitle_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
+
+        buttons = self.get_start_buttons()
+        self.draw_menu_action_button(surface, buttons["play"], "Play", (48, 84, 66), UI_GOOD)
+        self.draw_menu_action_button(surface, buttons["tutorial"], "Tutorial", (44, 56, 76), CYAN)
+
+        tips = [
+            ("Build", "Place light towers on lit cells."),
+            ("Fight", "Cannons shoot enemies inside light."),
+            ("Move", "Hold RMB to pan. Wheel to zoom."),
+        ]
+        card_gap = max(12, scaled(16))
+        card_w = min(max(180, scaled(260)), (SCREEN_WIDTH - scaled(100) - card_gap * 2) // 3)
+        card_h = max(72, scaled(88))
+        total_w = card_w * 3 + card_gap * 2
+        x = (SCREEN_WIDTH - total_w) // 2
+        y = min(SCREEN_HEIGHT - card_h - scaled(34), buttons["tutorial"].bottom + scaled(42))
+        for index, (label, text) in enumerate(tips):
+            rect = pygame.Rect(x + index * (card_w + card_gap), y, card_w, card_h)
+            draw_card(surface, rect, (22, 28, 38), (56, 70, 86), radius=scaled(7))
+            draw_fitted_text(surface, label, pygame.Rect(rect.x + scaled(12), rect.y + scaled(8), rect.w - scaled(24), rect.h // 3), CYAN, max_size=font_size_small, min_size=12, align="center")
+            draw_multiline_text(surface, text, pygame.Rect(rect.x + scaled(12), rect.y + rect.h // 3, rect.w - scaled(24), rect.h * 2 // 3 - scaled(6)), UI_TEXT_DIM, max_size=font_size_small - 6, min_size=10)
+
+    def get_tutorial_buttons(self):
+        gap = max(14, scaled(18))
+        button_w = min(max(160, scaled(220)), (SCREEN_WIDTH - scaled(120)) // 2)
+        button_h = max(54, scaled(66))
+        y = SCREEN_HEIGHT - button_h - scaled(34)
+        back_rect = pygame.Rect(SCREEN_WIDTH // 2 - button_w - gap // 2, y, button_w, button_h)
+        play_rect = pygame.Rect(SCREEN_WIDTH // 2 + gap // 2, y, button_w, button_h)
+        return {
+            "back": back_rect,
+            "play": play_rect,
+        }
+
+    def handle_tutorial_click(self, pos):
+        for action, rect in self.get_tutorial_buttons().items():
+            if rect.collidepoint(pos):
+                return action
+        return None
+
+    def draw_tutorial_card(self, surface, rect, title, body, accent):
+        draw_card(surface, rect, (22, 28, 38), (56, 70, 86), radius=scaled(7))
+        stripe_w = max(4, scaled(5))
+        pygame.draw.rect(surface, accent, (rect.x, rect.y, stripe_w, rect.h), border_radius=scaled(4))
+        title_rect = pygame.Rect(rect.x + scaled(16), rect.y + scaled(10), rect.w - scaled(28), max(30, scaled(36)))
+        body_rect = pygame.Rect(rect.x + scaled(16), title_rect.bottom + scaled(4), rect.w - scaled(28), rect.bottom - title_rect.bottom - scaled(12))
+        draw_fitted_text(surface, title, title_rect, WHITE, max_size=font_size_small, min_size=13)
+        draw_multiline_text(surface, body, body_rect, UI_TEXT_DIM, max_size=font_size_small - 5, min_size=10, align="left")
+
+    def draw_tutorial_screen(self, surface):
+        surface.fill((8, 12, 18))
+        step = max(42, scaled(64))
+        for x in range(0, SCREEN_WIDTH + step, step):
+            pygame.draw.line(surface, (17, 25, 36), (x, 0), (x - scaled(150), SCREEN_HEIGHT), max(1, scaled(1)))
+        for y in range(0, SCREEN_HEIGHT + step, step):
+            pygame.draw.line(surface, (13, 20, 30), (0, y), (SCREEN_WIDTH, y), max(1, scaled(1)))
+
+        title_rect = pygame.Rect(scaled(40), scaled(34), SCREEN_WIDTH - scaled(80), max(58, scaled(74)))
+        draw_fitted_text(surface, "How to play", title_rect, GOLD, max_size=font_size_large, min_size=24, align="center")
+        subtitle_rect = pygame.Rect(scaled(60), title_rect.bottom, SCREEN_WIDTH - scaled(120), max(34, scaled(44)))
+        draw_fitted_text(surface, "Read the board, build light, upgrade cannons, and destroy every hive.", subtitle_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=13, align="center")
+
+        cards = [
+            ("Goal", "Protect the Generator.\nDestroy all hives\nbefore enemies break through.", UI_GOOD),
+            ("Light", "Enemies are easiest\nto control inside light.\nReveal roads with towers.", GENERATOR_BLUE),
+            ("Build", "Click a build button.\nThen click a lit empty cell on the map.", GOLD),
+            ("Cannons", "Select a cannon to upgrade.\nChoose Sniper, Howitzer, or Gatling.", UI_WARN),
+            ("Camera", "Hold RMB and drag to move the map.\nUse the mouse wheel to zoom.", CYAN),
+            ("Waves", "Space starts the next wave early.\nPause the game to open Menu.", UI_BAD),
+        ]
+
+        buttons = self.get_tutorial_buttons()
+        grid_w = min(max(720, scaled(980)), SCREEN_WIDTH - scaled(80))
+        gap = max(12, scaled(16))
+        card_w = (grid_w - gap * 2) // 3
+        top = subtitle_rect.bottom + scaled(32)
+        bottom_limit = buttons["play"].y - scaled(30)
+        card_h = max(92, (bottom_limit - top - gap) // 2)
+        total_h = card_h * 2 + gap
+        start_x = (SCREEN_WIDTH - grid_w) // 2
+        start_y = top + max(0, (bottom_limit - top - total_h) // 2)
+        for index, (title, body, accent) in enumerate(cards):
+            row = index // 3
+            col = index % 3
+            rect = pygame.Rect(start_x + col * (card_w + gap), start_y + row * (card_h + gap), card_w, card_h)
+            self.draw_tutorial_card(surface, rect, title, body, accent)
+
+        self.draw_menu_action_button(surface, buttons["back"], "Back", (44, 56, 76), CYAN)
+        self.draw_menu_action_button(surface, buttons["play"], "Play", (48, 84, 66), UI_GOOD)
 
     def get_game_over_layout(self):
-        card_w = min(max(360, scaled(560)), SCREEN_WIDTH - scaled(80))
-        card_h = max(220, scaled(270))
+        card_w = min(max(620, scaled(860)), SCREEN_WIDTH - scaled(80))
+        card_h = max(420, scaled(520))
         card_rect = pygame.Rect(0, 0, card_w, card_h)
-        card_rect.center = (SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.40))
+        card_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
 
         gap = max(14, scaled(18))
-        button_w = min(max(170, scaled(230)), card_w - scaled(70))
+        button_w = min(max(150, scaled(190)), (card_w - gap * 3) // 2)
         button_h = max(54, scaled(68))
         button_y = card_rect.bottom - scaled(34) - button_h
-        play_rect = pygame.Rect(card_rect.centerx - button_w // 2, button_y, button_w, button_h)
+        menu_rect = pygame.Rect(card_rect.centerx - button_w - gap // 2, button_y, button_w, button_h)
+        again_rect = pygame.Rect(card_rect.centerx + gap // 2, button_y, button_w, button_h)
 
-        summary_w = min(max(640, scaled(920)), SCREEN_WIDTH - scaled(60))
-        summary_h = max(118, scaled(140))
-        summary_rect = pygame.Rect(0, 0, summary_w, summary_h)
-        summary_rect.midbottom = (SCREEN_WIDTH // 2, SCREEN_HEIGHT - scaled(28))
-
-        menu_w = min(max(150, scaled(190)), summary_w // 4)
-        menu_h = max(54, scaled(66))
-        pad = max(12, scaled(18))
-        menu_rect = pygame.Rect(
-            summary_rect.right - pad - menu_w,
-            summary_rect.y + (summary_rect.h - menu_h) // 2,
-            menu_w,
-            menu_h,
+        summary_rect = pygame.Rect(
+            card_rect.x + scaled(28),
+            card_rect.y + max(155, scaled(180)),
+            card_rect.w - scaled(56),
+            button_y - (card_rect.y + max(155, scaled(180))) - scaled(18),
         )
-        return card_rect, play_rect, summary_rect, menu_rect
+        return card_rect, menu_rect, again_rect, summary_rect
 
     def handle_game_over_click(self, pos):
         if not (self.victory or self.defeat):
             return None
-        _, play_rect, _, menu_rect = self.get_game_over_layout()
-        if play_rect.collidepoint(pos):
-            return "play_again"
+        _, menu_rect, again_rect, _ = self.get_game_over_layout()
         if menu_rect.collidepoint(pos):
             return "menu"
+        if again_rect.collidepoint(pos):
+            return "play_again"
         return None
 
     def get_match_summary_items(self):
@@ -2393,19 +2602,18 @@ class Game:
             ("Bonuses", self.bonuses_collected),
         ]
 
-    def draw_match_summary_panel(self, surface, summary_rect, menu_rect):
-        draw_card(surface, summary_rect, (20, 25, 34), UI_STROKE, radius=scaled(8))
+    def draw_match_summary_panel(self, surface, summary_rect):
         pad = max(12, scaled(18))
         gap = max(8, scaled(10))
         title_h = max(26, scaled(32))
-        title_rect = pygame.Rect(summary_rect.x + pad, summary_rect.y + scaled(10), menu_rect.x - summary_rect.x - pad * 2, title_h)
-        draw_fitted_text(surface, "Run Summary", title_rect, WHITE, max_size=font_size_small, min_size=14)
+        title_rect = pygame.Rect(summary_rect.x, summary_rect.y, summary_rect.w, title_h)
+        draw_fitted_text(surface, "Run Summary", title_rect, WHITE, max_size=font_size_small, min_size=14, align="center")
 
         stats = self.get_match_summary_items()
-        stats_x = summary_rect.x + pad
+        stats_x = summary_rect.x
         stats_y = title_rect.bottom + max(5, scaled(6))
-        stats_w = menu_rect.x - stats_x - pad
-        stats_h = summary_rect.bottom - stats_y - pad
+        stats_w = summary_rect.w
+        stats_h = summary_rect.bottom - stats_y
         card_w = max(64, (stats_w - gap * (len(stats) - 1)) // len(stats))
         for index, (label, value) in enumerate(stats):
             rect = pygame.Rect(stats_x + index * (card_w + gap), stats_y, card_w, stats_h)
@@ -2415,14 +2623,12 @@ class Game:
             draw_fitted_text(surface, label, label_rect, UI_TEXT_DIM, max_size=font_size_small - 4, min_size=10, align="center")
             draw_fitted_text(surface, value, value_rect, WHITE, max_size=font_size_small, min_size=12, align="center")
 
-        self.draw_menu_action_button(surface, menu_rect, "Menu", (44, 56, 76), CYAN)
-
     def draw_game_over_overlay(self, surface):
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 170))
         surface.blit(overlay, (0, 0))
 
-        card_rect, play_rect, summary_rect, menu_rect = self.get_game_over_layout()
+        card_rect, menu_rect, again_rect, summary_rect = self.get_game_over_layout()
         accent = GOLD if self.victory else UI_BAD
         fill = (24, 30, 42) if self.victory else (42, 24, 30)
         title = "VICTORY!" if self.victory else "DEFEAT"
@@ -2434,8 +2640,9 @@ class Game:
         detail_rect = pygame.Rect(card_rect.x + scaled(32), title_rect.bottom, card_rect.w - scaled(64), max(42, scaled(58)))
         draw_fitted_text(surface, detail, detail_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
 
-        self.draw_menu_action_button(surface, play_rect, "Play Again", (48, 84, 66), UI_GOOD)
-        self.draw_match_summary_panel(surface, summary_rect, menu_rect)
+        self.draw_match_summary_panel(surface, summary_rect)
+        self.draw_menu_action_button(surface, menu_rect, "Menu", (44, 56, 76), CYAN)
+        self.draw_menu_action_button(surface, again_rect, "Again", (48, 84, 66), UI_GOOD)
 
     def get_exit_confirm_layout(self):
         card_w = min(max(350, scaled(520)), SCREEN_WIDTH - scaled(80))
@@ -2710,38 +2917,7 @@ class Game:
             self.draw_pause_overlay(surface)
 
         if self.tower_specialization_pending:
-            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 150))
-            surface.blit(overlay, (0, 0))
-            
-            menu_w = scaled(400)
-            menu_h = scaled(300)
-            menu_x = (SCREEN_WIDTH - menu_w) // 2
-            menu_y = (SCREEN_HEIGHT - menu_h) // 2
-            
-            menu_rect = pygame.Rect(menu_x, menu_y, menu_w, menu_h)
-            draw_card(surface, menu_rect, UI_PANEL, GOLD, radius=scaled(8))
-            
-            title_rect = pygame.Rect(menu_x + scaled(18), menu_y + scaled(16), menu_w - scaled(36), scaled(48))
-            draw_fitted_text(surface, "Choose Cannon Specialization", title_rect, WHITE, max_size=font_size_medium, min_size=16, align="center")
-            
-            specs = self.get_specialization_options()
-            
-            btn_w = scaled(160)
-            btn_h = scaled(60)
-            gap = scaled(20)
-            start_x = menu_x + (menu_w - 2 * btn_w - gap) // 2
-            start_y_menu = menu_y + scaled(100)
-            
-            for i, (name, color, spec) in enumerate(specs):
-                row = i // 2
-                col = i % 2
-                bx = start_x + col * (btn_w + gap)
-                by = start_y_menu + row * (btn_h + gap)
-                
-                rect = pygame.Rect(bx, by, btn_w, btn_h)
-                draw_card(surface, rect, color, BLACK, radius=scaled(6))
-                draw_fitted_text(surface, name, rect.inflate(-scaled(12), -scaled(8)), BLACK, max_size=font_size_small, min_size=12, align="center")
+            self.draw_specialization_modal(surface)
 
         if self.victory or self.defeat:
             self.draw_game_over_overlay(surface)
@@ -2765,8 +2941,16 @@ while running:
             if game.is_start_screen():
                 if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                     game = Game(show_start=False)
+                elif event.key == pygame.K_t:
+                    game.screen_state = "tutorial"
                 elif event.key == pygame.K_ESCAPE:
                     running = False
+                continue
+            if game.is_tutorial_screen():
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    game = Game(show_start=False)
+                elif event.key == pygame.K_ESCAPE:
+                    game.screen_state = "start"
                 continue
             if game.victory or game.defeat:
                 if event.key in (pygame.K_RETURN, pygame.K_SPACE):
@@ -2788,12 +2972,21 @@ while running:
             if event.key == pygame.K_p:
                 game.toggle_pause()
 
-        if game.is_start_screen() or game.victory or game.defeat:
+        if game.is_start_screen() or game.is_tutorial_screen() or game.victory or game.defeat:
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 pos = pygame.mouse.get_pos()
-                action = game.handle_start_click(pos) if game.is_start_screen() else game.handle_game_over_click(pos)
+                if game.is_start_screen():
+                    action = game.handle_start_click(pos)
+                elif game.is_tutorial_screen():
+                    action = game.handle_tutorial_click(pos)
+                else:
+                    action = game.handle_game_over_click(pos)
                 if action in ("play", "play_again"):
                     game = Game(show_start=False)
+                elif action == "tutorial":
+                    game.screen_state = "tutorial"
+                elif action == "back":
+                    game.screen_state = "start"
                 elif action == "menu":
                     game = Game(show_start=True)
             continue
@@ -2836,30 +3029,7 @@ while running:
                 continue
             
             if game.tower_specialization_pending:
-                menu_w = scaled(400)
-                menu_h = scaled(300)
-                menu_x = (SCREEN_WIDTH - menu_w) // 2
-                menu_y = (SCREEN_HEIGHT - menu_h) // 2
-                
-                specs = game.get_specialization_options()
-                btn_w = scaled(160)
-                btn_h = scaled(60)
-                gap = scaled(20)
-                start_x = menu_x + (menu_w - 2 * btn_w - gap) // 2
-                start_y_menu = menu_y + scaled(100)
-                
-                for i, (_, _, spec) in enumerate(specs):
-                    row = i // 2
-                    col = i % 2
-                    bx = start_x + col * (btn_w + gap)
-                    by = start_y_menu + row * (btn_h + gap)
-                    
-                    rect = pygame.Rect(bx, by, btn_w, btn_h)
-                    if rect.collidepoint(pos):
-                        game.apply_tower_specialization(spec)
-                        break
-                else:
-                    game.cancel_tower_specialization()
+                game.handle_specialization_click(pos)
                 continue
             
             if pos[0] >= SCREEN_WIDTH - SIDE_PANEL_WIDTH:
@@ -2885,6 +3055,8 @@ while running:
 
     if game.is_start_screen():
         game.draw_start_screen(screen)
+    elif game.is_tutorial_screen():
+        game.draw_tutorial_screen(screen)
     else:
         if not game.exit_confirm_open and not game.tower_specialization_pending and not game.victory and not game.defeat:
             game.update_camera()
