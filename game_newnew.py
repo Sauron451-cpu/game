@@ -100,12 +100,12 @@ EDGE_SCROLL_SIZE = max(16, int(22 * SCALE))
 CAMERA_DRAG_THRESHOLD = max(6, int(10 * SCALE))
 
 TOWER_COST = {
-    "lamp": 100,
-    "beacon": 150
+    "lamp": 150,
+    "beacon": 100
 }
 TOWER_UPGRADE_COST = {
-    "lamp": 140,
-    "beacon": 200,
+    "lamp": 200,
+    "beacon": 140,
     "cannon": 200
 }
 
@@ -116,11 +116,11 @@ GENERATOR_UPGRADE_COST = {1: 300, 2: 600, 3: 1200}
 ARTILLERY_COST = 400
 REPAIR_CANNON_COST = 150
 
-BUILDABLE_TOWER_TYPES = ["lamp", "beacon"]
+BUILDABLE_TOWER_TYPES = ["beacon", "lamp"]
 LIGHT_TOWER_TYPES = {"lamp", "beacon"}
 TOWER_DISPLAY_NAMES = {
-    "lamp": "Observer",
-    "beacon": "Farseeker",
+    "lamp": "Farseeker",
+    "beacon": "Observer",
     "cannon": "Cannon",
 }
 LIGHT_SIZE_BY_LEVEL = {1: 5, 2: 7, 3: 9, 4: 11}
@@ -136,6 +136,8 @@ ROUTE_LIGHT_LOOKAHEAD_CELLS = 9
 ROUTE_LIGHT_SWITCH_MIN_LIT = 4
 ROUTE_LIGHT_SWITCH_RATIO = 0.45
 ADAPTIVE_ROUTE_WAVE_INTERVAL = 3
+ENEMY_COUNT_BASE_PER_HIVE = 5
+ENEMY_COUNT_GROWTH_PER_WAVE = 0.5
 ENEMY_HEALTH_MULTIPLIER = 2.0
 ENEMY_SPEED_MULTIPLIER = 1.5
 ENEMY_HP_GROWTH_PER_WAVE = 0.20
@@ -707,12 +709,12 @@ class Tower:
             self.range = CELL_SIZE * max(GRID_WIDTH, GRID_HEIGHT) * 2
             self.cooldown_max = max(28, int(48 - max(0, self.level - 2) * 6))
             self.splash_radius = scaled(115)
-            self.splash_damage_multiplier = 0.75
+            self.splash_damage_multiplier = 1.0
         elif spec_type == "gatling":
             self.color = (120, 230, 140)
             self.damage = int(58 * level_bonus)
             self.range = CELL_SIZE * (16 + max(0, self.level - 2) * 2)
-            self.cooldown_max = max(8, int(16 - max(0, self.level - 2) * 2))
+            self.cooldown_max = max(4, int((16 - max(0, self.level - 2) * 2) / 2))
             self.splash_radius = 0
             self.splash_damage_multiplier = 0
         self.cooldown = min(self.cooldown, self.cooldown_max)
@@ -1475,7 +1477,8 @@ class Game:
                 self.first_wave_started = True
             
             self.spawn_queue = []
-            count_per_hive = max(1, int((5 + self.wave - 1) * self.hive_spawn_multiplier()))
+            base_count = ENEMY_COUNT_BASE_PER_HIVE + int((self.wave - 1) * ENEMY_COUNT_GROWTH_PER_WAVE)
+            count_per_hive = max(1, int(base_count * self.hive_spawn_multiplier()))
             active_hives = [hive for hive in self.hives if hive.is_alive]
             spawn_lanes = {
                 hive.road_key: self.choose_spawn_lane(hive)
