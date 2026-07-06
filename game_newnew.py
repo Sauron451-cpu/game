@@ -110,7 +110,7 @@ TOWER_UPGRADE_COST = {
 }
 
 STARTING_MONEY = 210
-GENERATOR_INCOME_BY_LEVEL = {1: 2.5, 2: 5, 3: 10, 4: 20}
+GENERATOR_INCOME_BY_LEVEL = {1: 5, 2: 10, 3: 20, 4: 40}
 GENERATOR_TOWER_LIMIT_BY_LEVEL = {1: 6, 2: 10, 3: 13, 4: 16}
 GENERATOR_UPGRADE_COST = {1: 300, 2: 600, 3: 1200}
 ARTILLERY_COST = 400
@@ -138,11 +138,13 @@ ROUTE_LIGHT_SWITCH_RATIO = 0.45
 ADAPTIVE_ROUTE_WAVE_INTERVAL = 3
 ENEMY_COUNT_BASE_PER_HIVE = 5
 ENEMY_COUNT_GROWTH_PER_WAVE = 0.5
+ENEMY_STRENGTH_MULTIPLIER = 1.05
 ENEMY_HEALTH_MULTIPLIER = 2.0
 ENEMY_SPEED_MULTIPLIER = 1.5
 ENEMY_HP_GROWTH_PER_WAVE = 0.20
 ENEMY_SPEED_GROWTH_PER_WAVE = 0.04
 ENEMY_DAMAGE_GROWTH_PER_WAVE = 0.10
+ENEMY_REWARD_MULTIPLIER = 1.20
 ENEMY_REWARD_GROWTH_PER_WAVE = 0.10
 ENEMY_DARK_SPEED_MULTIPLIER = 7.0
 DIMMER_START_WAVE = 3
@@ -506,7 +508,7 @@ class Enemy:
                           "vulnerable_to": {"cannon": 1.8}}
         }
         s = stats[enemy_type]
-        self.max_hp = int(s["hp"] * ENEMY_HEALTH_MULTIPLIER)
+        self.max_hp = int(s["hp"] * ENEMY_HEALTH_MULTIPLIER * ENEMY_STRENGTH_MULTIPLIER)
         self.hp = self.max_hp
         self.phys_armor = s["phys"]
         self.mag_armor = s["mag"]
@@ -514,7 +516,7 @@ class Enemy:
         self.base_speed = self.speed
         self.evade = s["evade"]
         self.color = s["color"]
-        self.attack_damage = s["atk_dmg"]
+        self.attack_damage = max(1, s["atk_dmg"] * ENEMY_STRENGTH_MULTIPLIER)
         self.attack_range = s["atk_range"]
         self.attack_cooldown_max = s["atk_cd"]
         self.attack_cooldown = 0
@@ -1452,8 +1454,8 @@ class Game:
         enemy.hp = enemy.max_hp
         enemy.speed *= speed_bonus
         enemy.base_speed = enemy.speed
-        enemy.attack_damage = max(1, int(round(enemy.attack_damage * damage_bonus)))
-        enemy.reward = int(enemy.reward * reward_bonus)
+        enemy.attack_damage = max(1, enemy.attack_damage * damage_bonus)
+        enemy.reward = int(enemy.reward * ENEMY_REWARD_MULTIPLIER * reward_bonus)
         return enemy
 
     def tick_action_cooldowns(self):
