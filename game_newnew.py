@@ -460,13 +460,33 @@ def draw_fitted_text(surface, text, rect, color=WHITE, max_size=None, min_size=1
     surface.set_clip(old_clip)
     return rendered
 
+def wrap_text_lines(text, font, max_width):
+    wrapped = []
+    raw_lines = str(text).splitlines() or [""]
+    for raw_line in raw_lines:
+        words = raw_line.split()
+        if not words:
+            wrapped.append("")
+            continue
+        line = ""
+        for word in words:
+            candidate = word if not line else f"{line} {word}"
+            if font.size(candidate)[0] <= max_width:
+                line = candidate
+                continue
+            if line:
+                wrapped.append(line)
+            line = word
+        wrapped.append(line)
+    return wrapped
+
 def draw_multiline_text(surface, text, rect, color=WHITE, max_size=None, min_size=12, align="center"):
-    lines = str(text).splitlines() or [""]
     max_size = int(max_size or font_size_small)
     min_size = max(10, int(min_size))
     chosen = None
     for size in range(max_size, min_size - 1, -2):
         font = ui_font(size)
+        lines = wrap_text_lines(text, font, rect.w)
         rendered = [font.render(line, True, color) for line in lines]
         line_gap = max(2, size // 7)
         total_h = sum(line.get_height() for line in rendered) + line_gap * max(0, len(rendered) - 1)
@@ -476,6 +496,7 @@ def draw_multiline_text(surface, text, rect, color=WHITE, max_size=None, min_siz
             break
     if chosen is None:
         font = ui_font(min_size)
+        lines = wrap_text_lines(text, font, rect.w)
         rendered = [font.render(line, True, color) for line in lines]
         line_gap = max(2, min_size // 7)
         total_h = sum(line.get_height() for line in rendered) + line_gap * max(0, len(rendered) - 1)
@@ -504,6 +525,13 @@ def draw_card(surface, rect, fill=UI_CARD, stroke=UI_STROKE, radius=None):
     radius = scaled(6) if radius is None else radius
     pygame.draw.rect(surface, fill, rect, border_radius=radius)
     pygame.draw.rect(surface, stroke, rect, max(1, scaled(2)), border_radius=radius)
+
+def mix_color(color, target, amount):
+    amount = max(0, min(1, amount))
+    return tuple(int(c + (t - c) * amount) for c, t in zip(color, target))
+
+def ui_pulse(speed=0.006):
+    return 0.5 + 0.5 * math.sin(pygame.time.get_ticks() * speed)
 
 def draw_progress_bar(surface, rect, fraction, fill=UI_GOOD, back=(14, 17, 23), stroke=BLACK):
     fraction = max(0, min(1, fraction))
@@ -1632,6 +1660,13 @@ class Game:
             return title
         return f"{title} {math.ceil(frames_left / 60)}s"
 
+    def action_cooldown_progress(self, action):
+        frames_left = self.action_cooldowns.get(action, 0)
+        total = ACTION_COOLDOWN_FRAMES.get(action, 0)
+        if frames_left <= 0 or total <= 0:
+            return None
+        return 1 - frames_left / total
+
     def start_action_cooldown(self, action):
         if action in ACTION_COOLDOWN_FRAMES:
             self.action_cooldowns[action] = ACTION_COOLDOWN_FRAMES[action]
@@ -1867,6 +1902,7 @@ class Game:
                 ),
                 "selected": self.selected_tower_type == tower_type,
                 "rect": pygame.Rect(left_x, start_y + len(buttons) * (btn_height + btn_gap), btn_width, btn_height),
+                "cooldown": "build",
             })
         return buttons
 
@@ -1933,6 +1969,7 @@ class Game:
                     "cost": None,
                     "enabled": self.can_use_action("rotate"),
                     "selected": False,
+                    "cooldown": "rotate",
                 })
 
             if (
@@ -1946,6 +1983,7 @@ class Game:
                     "cost": None,
                     "enabled": self.can_use_action("change_specialization"),
                     "selected": False,
+                    "cooldown": "change_specialization",
                 })
 
             buttons.append({
@@ -1955,6 +1993,7 @@ class Game:
                 "enabled": self.can_sell_tower(self.selected_tower),
                 "selected": False,
                 "danger": True,
+                "cooldown": "sell",
             })
         elif self.selected_hive:
             buttons.append({
@@ -2143,7 +2182,7 @@ class Game:
         text_rect = pygame.Rect(x + icon_size + scaled(4), y - scaled(2), scaled(58), icon_size + scaled(4))
         draw_fitted_text(surface, int(amount), text_rect, text_color, max_size=font_size_small, min_size=12)
 
-    def draw_panel_button(self, surface, rect, title, cost=None, enabled=True, selected=False, danger=False):
+    def draw_panel_button(self, surface, rect, title, cost=None, enabled=True, selected=False, danger=False, hovered=False, cooldown_progress=None):
         if selected:
             color = UI_CARD_HOT
             stroke = CYAN
@@ -2156,6 +2195,14 @@ class Game:
         else:
             color = (48, 52, 59)
             stroke = (82, 86, 94)
+
+        if hovered:
+            pulse = ui_pulse()
+            color = mix_color(color, WHITE, 0.08 if enabled else 0.04)
+            stroke = mix_color(stroke, WHITE if enabled else UI_TEXT_DIM, 0.22 + pulse * 0.16)
+            outer = rect.inflate(max(4, scaled(5)), max(4, scaled(5)))
+            pygame.draw.rect(surface, stroke, outer, max(2, scaled(3)), border_radius=scaled(8))
+
         draw_card(surface, rect, color, stroke, radius=scaled(6))
         text_color = WHITE if enabled else (150, 154, 160)
         title_width = rect.w - scaled(20)
@@ -2166,9 +2213,18 @@ class Game:
         if cost is not None:
             cost_x = rect.right - scaled(82)
             self.draw_cost(surface, cost, (cost_x, rect.y + (rect.h - max(22, scaled(28))) // 2), WHITE if enabled else (150, 154, 160))
+        if cooldown_progress is not None:
+            bar_h = max(6, scaled(8))
+            bar_rect = pygame.Rect(rect.x + scaled(10), rect.bottom - bar_h - scaled(7), rect.w - scaled(20), bar_h)
+            pygame.draw.rect(surface, (20, 24, 31), bar_rect, border_radius=scaled(3))
+            fill_rect = bar_rect.copy()
+            fill_rect.w = max(2, int(bar_rect.w * max(0, min(1, cooldown_progress))))
+            pygame.draw.rect(surface, UI_WARN, fill_rect, border_radius=scaled(3))
+            pygame.draw.rect(surface, mix_color(UI_WARN, WHITE, 0.25), bar_rect, max(1, scaled(1)), border_radius=scaled(3))
 
     def draw_right_panel_buttons(self, surface):
         buttons, right_x, btn_width, start_y, btn_gap, btn_height = self.get_right_panel_layout()
+        mouse_pos = pygame.mouse.get_pos()
         for index, button in enumerate(buttons):
             rect = pygame.Rect(right_x, start_y + index * (btn_height + btn_gap), btn_width, btn_height)
             self.draw_panel_button(
@@ -2179,6 +2235,8 @@ class Game:
                 button["enabled"],
                 button["selected"],
                 button.get("danger", False),
+                rect.collidepoint(mouse_pos),
+                self.action_cooldown_progress(button.get("cooldown")),
             )
 
     def draw_left_panel(self, surface):
@@ -2213,6 +2271,7 @@ class Game:
             None,
             pause_button["enabled"],
             pause_button["selected"],
+            hovered=pause_button["rect"].collidepoint(pygame.mouse.get_pos()),
         )
 
         if self.paused:
@@ -2224,6 +2283,7 @@ class Game:
                 None,
                 menu_button["enabled"],
                 menu_button["selected"],
+                hovered=menu_button["rect"].collidepoint(pygame.mouse.get_pos()),
             )
 
         build_buttons = self.get_left_build_buttons()
@@ -2239,6 +2299,8 @@ class Game:
                 button["cost"],
                 button["enabled"],
                 button["selected"],
+                hovered=button["rect"].collidepoint(pygame.mouse.get_pos()),
+                cooldown_progress=self.action_cooldown_progress(button.get("cooldown")),
             )
 
     def draw_right_panel_context(self, surface):
@@ -2319,20 +2381,20 @@ class Game:
 
     def get_specialization_options(self):
         return [
-            ("Sniper", "Powerful gun\nwith solid\ndamage", (255, 220, 90), "sniper"),
-            ("Howitzer", "High explosive\ndelivery into\nthe area", (255, 145, 70), "scatter"),
-            ("Gatling", "Fast-shot\ncannon for\nsteady fire", (120, 230, 140), "gatling"),
+            ("Sniper", "Strong shot.\nGood vs armor.", (255, 220, 90), "sniper"),
+            ("Howitzer", "Area blast.\nHalf damage.", (255, 145, 70), "scatter"),
+            ("Gatling", "Fast bursts.\nBest vs light.", (120, 230, 140), "gatling"),
         ]
 
     def get_specialization_layout(self):
-        menu_w = min(max(540, scaled(680)), SCREEN_WIDTH - scaled(80))
-        menu_h = max(230, scaled(290))
+        menu_w = min(max(640, scaled(760)), SCREEN_WIDTH - scaled(80))
+        menu_h = max(300, scaled(360))
         menu_rect = pygame.Rect(0, 0, menu_w, menu_h)
         menu_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
 
-        pad = max(22, scaled(30))
-        gap = max(18, scaled(24))
-        title_h = max(42, scaled(54))
+        pad = max(26, scaled(34))
+        gap = max(20, scaled(26))
+        title_h = max(54, scaled(66))
         card_h = menu_h - pad * 2 - title_h - scaled(18)
         card_w = (menu_w - pad * 2 - gap * 2) // 3
         card_y = menu_rect.y + pad + title_h + scaled(12)
@@ -2360,24 +2422,35 @@ class Game:
 
         menu_rect, card_rects = self.get_specialization_layout()
         draw_card(surface, menu_rect, (27, 28, 31), (56, 60, 66), radius=scaled(10))
-        title_rect = pygame.Rect(menu_rect.x + scaled(24), menu_rect.y + scaled(18), menu_rect.w - scaled(48), max(42, scaled(54)))
-        draw_fitted_text(surface, "Choose modification", title_rect, WHITE, max_size=font_size_medium, min_size=18, align="center")
+        title_rect = pygame.Rect(menu_rect.x + scaled(24), menu_rect.y + scaled(18), menu_rect.w - scaled(48), max(54, scaled(66)))
+        draw_fitted_text(surface, "Choose modification", title_rect, WHITE, max_size=font_size_medium + scaled(8), min_size=24, align="center")
 
         current_spec = self.tower_to_specialize.specialization if self.tower_to_specialize else None
+        mouse_pos = pygame.mouse.get_pos()
         for rect, (name, description, accent, spec) in zip(card_rects, self.get_specialization_options()):
             selected = spec == current_spec
+            hovered = rect.collidepoint(mouse_pos)
             fill = (34, 36, 41) if selected else (27, 28, 31)
-            stroke = CYAN if selected else (27, 28, 31)
+            stroke = CYAN if selected else (56, 60, 66)
+            if hovered:
+                pulse = ui_pulse()
+                fill = mix_color(fill, accent, 0.10)
+                stroke = mix_color(accent, WHITE, 0.12 + pulse * 0.16)
+                outer = rect.inflate(max(6, scaled(8)), max(6, scaled(8)))
+                pygame.draw.rect(surface, stroke, outer, max(2, scaled(3)), border_radius=scaled(12))
             draw_card(surface, rect, fill, stroke, radius=scaled(10))
 
-            name_rect = pygame.Rect(rect.x + scaled(10), rect.y + scaled(14), rect.w - scaled(20), max(30, scaled(38)))
-            draw_fitted_text(surface, name, name_rect, WHITE, max_size=font_size_small, min_size=14, align="center")
+            name_rect = pygame.Rect(rect.x + scaled(12), rect.y + scaled(16), rect.w - scaled(24), max(42, scaled(50)))
+            draw_fitted_text(surface, name, name_rect, WHITE, max_size=font_size_small + scaled(8), min_size=20, align="center")
 
-            desc_rect = pygame.Rect(rect.x + scaled(12), name_rect.bottom + scaled(8), rect.w - scaled(24), rect.bottom - name_rect.bottom - scaled(20))
-            draw_multiline_text(surface, description, desc_rect, UI_TEXT_DIM, max_size=font_size_small - 4, min_size=11, align="center")
+            desc_rect = pygame.Rect(rect.x + scaled(14), name_rect.bottom + scaled(8), rect.w - scaled(28), rect.bottom - name_rect.bottom - scaled(20))
+            draw_multiline_text(surface, description, desc_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(2), min_size=16, align="center")
 
             if selected:
                 pygame.draw.rect(surface, accent, rect, max(2, scaled(3)), border_radius=scaled(10))
+            if hovered:
+                glow_rect = pygame.Rect(rect.x + scaled(14), rect.y + scaled(10), rect.w - scaled(28), max(4, scaled(5)))
+                pygame.draw.rect(surface, accent, glow_rect, border_radius=scaled(3))
 
     def draw_top_status(self, surface):
         pad = max(10, scaled(14))
@@ -2418,28 +2491,36 @@ class Game:
         overlay = pygame.Surface((VIEWPORT_WIDTH, VIEWPORT_HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 105))
         surface.blit(overlay, (VIEWPORT_X, VIEWPORT_Y))
-        card_w = min(max(260, scaled(360)), VIEWPORT_WIDTH - scaled(60))
-        card_h = max(110, scaled(145))
+        card_w = min(max(330, scaled(430)), VIEWPORT_WIDTH - scaled(60))
+        card_h = max(150, scaled(190))
         rect = pygame.Rect(0, 0, card_w, card_h)
         rect.center = (VIEWPORT_X + VIEWPORT_WIDTH // 2, VIEWPORT_Y + VIEWPORT_HEIGHT // 2)
         draw_card(surface, rect, (22, 28, 38), CYAN, radius=scaled(8))
         title_rect = pygame.Rect(rect.x + scaled(18), rect.y + scaled(18), rect.w - scaled(36), rect.h // 2)
-        draw_fitted_text(surface, "Paused", title_rect, WHITE, max_size=font_size_large, min_size=24, align="center")
+        draw_fitted_text(surface, "Paused", title_rect, WHITE, max_size=font_size_large + scaled(8), min_size=28, align="center")
         state_rect = pygame.Rect(rect.x + scaled(18), rect.y + rect.h // 2, rect.w - scaled(36), rect.h // 3)
-        draw_fitted_text(surface, f"Wave {self.wave} - {len(self.enemies)} enemies alive", state_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=12, align="center")
+        draw_fitted_text(surface, f"Wave {self.wave} - {len(self.enemies)} enemies alive", state_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(4), min_size=16, align="center")
 
     def draw_menu_action_button(self, surface, rect, title, fill=(48, 84, 66), stroke=UI_GOOD):
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        if hovered:
+            pulse = ui_pulse()
+            hover_stroke = mix_color(stroke, WHITE, 0.22 + pulse * 0.16)
+            outer = rect.inflate(max(5, scaled(7)), max(5, scaled(7)))
+            pygame.draw.rect(surface, hover_stroke, outer, max(2, scaled(3)), border_radius=scaled(10))
+            fill = mix_color(fill, WHITE, 0.09)
+            stroke = hover_stroke
         draw_card(surface, rect, fill, stroke, radius=scaled(8))
-        label_rect = rect.inflate(-scaled(18), -scaled(10))
-        draw_fitted_text(surface, title, label_rect, WHITE, max_size=font_size_medium, min_size=16, align="center")
+        label_rect = rect.inflate(-scaled(18), -scaled(8))
+        draw_fitted_text(surface, title, label_rect, WHITE, max_size=font_size_medium + scaled(10), min_size=22, align="center")
 
     def get_start_buttons(self):
-        button_w = min(max(260, scaled(340)), SCREEN_WIDTH - scaled(80))
-        button_h = max(58, scaled(72))
-        gap = max(14, scaled(18))
+        button_w = min(max(300, scaled(390)), SCREEN_WIDTH - scaled(80))
+        button_h = max(72, scaled(88))
+        gap = max(16, scaled(22))
         play_rect = pygame.Rect(0, 0, button_w, button_h)
         tutorial_rect = pygame.Rect(0, 0, button_w, button_h)
-        play_rect.center = (SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.58))
+        play_rect.center = (SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.56))
         tutorial_rect.center = (SCREEN_WIDTH // 2, play_rect.centery + button_h + gap)
         return {
             "play": play_rect,
@@ -2465,36 +2546,36 @@ class Game:
             pygame.draw.line(surface, (14, 22, 32), (0, y), (SCREEN_WIDTH, y), max(1, scaled(1)))
 
         title_rect = pygame.Rect(scaled(40), int(SCREEN_HEIGHT * 0.20), SCREEN_WIDTH - scaled(80), max(86, scaled(126)))
-        draw_fitted_text(surface, GAME_TITLE, title_rect, GOLD, max_size=max(font_size_large, scaled(118)), min_size=28, align="center")
+        draw_fitted_text(surface, GAME_TITLE, title_rect, GOLD, max_size=max(font_size_large + scaled(12), scaled(124)), min_size=32, align="center")
 
         subtitle_rect = pygame.Rect(scaled(60), title_rect.bottom + scaled(8), SCREEN_WIDTH - scaled(120), max(34, scaled(44)))
-        draw_fitted_text(surface, "Light the roads. Hold the hives back. Keep the Generator alive.", subtitle_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
+        draw_fitted_text(surface, "Light roads. Stop hives. Save the Generator.", subtitle_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(5), min_size=18, align="center")
 
         buttons = self.get_start_buttons()
         self.draw_menu_action_button(surface, buttons["play"], "Play", (48, 84, 66), UI_GOOD)
         self.draw_menu_action_button(surface, buttons["tutorial"], "Tutorial", (44, 56, 76), CYAN)
 
         tips = [
-            ("Build", "Place light towers on lit cells."),
-            ("Fight", "Cannons shoot enemies inside light."),
-            ("Move", "Hold RMB to pan. Wheel to zoom."),
+            ("Build", "Light first.\nThen place towers."),
+            ("Fight", "Cannons hit enemies\ninside light."),
+            ("Move", "Hold RMB to pan.\nWheel to zoom."),
         ]
         card_gap = max(12, scaled(16))
         card_w = min(max(180, scaled(260)), (SCREEN_WIDTH - scaled(100) - card_gap * 2) // 3)
-        card_h = max(72, scaled(88))
+        card_h = max(92, scaled(112))
         total_w = card_w * 3 + card_gap * 2
         x = (SCREEN_WIDTH - total_w) // 2
         y = min(SCREEN_HEIGHT - card_h - scaled(34), buttons["tutorial"].bottom + scaled(42))
         for index, (label, text) in enumerate(tips):
             rect = pygame.Rect(x + index * (card_w + card_gap), y, card_w, card_h)
             draw_card(surface, rect, (22, 28, 38), (56, 70, 86), radius=scaled(7))
-            draw_fitted_text(surface, label, pygame.Rect(rect.x + scaled(12), rect.y + scaled(8), rect.w - scaled(24), rect.h // 3), CYAN, max_size=font_size_small, min_size=12, align="center")
-            draw_multiline_text(surface, text, pygame.Rect(rect.x + scaled(12), rect.y + rect.h // 3, rect.w - scaled(24), rect.h * 2 // 3 - scaled(6)), UI_TEXT_DIM, max_size=font_size_small - 6, min_size=10)
+            draw_fitted_text(surface, label, pygame.Rect(rect.x + scaled(12), rect.y + scaled(8), rect.w - scaled(24), rect.h // 3), CYAN, max_size=font_size_small + scaled(5), min_size=16, align="center")
+            draw_multiline_text(surface, text, pygame.Rect(rect.x + scaled(12), rect.y + rect.h // 3, rect.w - scaled(24), rect.h * 2 // 3 - scaled(6)), UI_TEXT_DIM, max_size=font_size_small, min_size=14)
 
     def get_tutorial_buttons(self):
-        gap = max(14, scaled(18))
-        button_w = min(max(160, scaled(220)), (SCREEN_WIDTH - scaled(120)) // 2)
-        button_h = max(54, scaled(66))
+        gap = max(16, scaled(22))
+        button_w = min(max(190, scaled(250)), (SCREEN_WIDTH - scaled(120)) // 2)
+        button_h = max(66, scaled(80))
         y = SCREEN_HEIGHT - button_h - scaled(34)
         back_rect = pygame.Rect(SCREEN_WIDTH // 2 - button_w - gap // 2, y, button_w, button_h)
         play_rect = pygame.Rect(SCREEN_WIDTH // 2 + gap // 2, y, button_w, button_h)
@@ -2513,10 +2594,10 @@ class Game:
         draw_card(surface, rect, (22, 28, 38), (56, 70, 86), radius=scaled(7))
         stripe_w = max(4, scaled(5))
         pygame.draw.rect(surface, accent, (rect.x, rect.y, stripe_w, rect.h), border_radius=scaled(4))
-        title_rect = pygame.Rect(rect.x + scaled(16), rect.y + scaled(10), rect.w - scaled(28), max(30, scaled(36)))
-        body_rect = pygame.Rect(rect.x + scaled(16), title_rect.bottom + scaled(4), rect.w - scaled(28), rect.bottom - title_rect.bottom - scaled(12))
-        draw_fitted_text(surface, title, title_rect, WHITE, max_size=font_size_small, min_size=13)
-        draw_multiline_text(surface, body, body_rect, UI_TEXT_DIM, max_size=font_size_small - 5, min_size=10, align="left")
+        title_rect = pygame.Rect(rect.x + scaled(18), rect.y + scaled(12), rect.w - scaled(32), max(42, scaled(50)))
+        body_rect = pygame.Rect(rect.x + scaled(18), title_rect.bottom + scaled(6), rect.w - scaled(32), rect.bottom - title_rect.bottom - scaled(16))
+        draw_fitted_text(surface, title, title_rect, WHITE, max_size=font_size_small + scaled(8), min_size=20)
+        draw_multiline_text(surface, body, body_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(3), min_size=16, align="left")
 
     def draw_tutorial_screen(self, surface):
         surface.fill((8, 12, 18))
@@ -2526,18 +2607,18 @@ class Game:
         for y in range(0, SCREEN_HEIGHT + step, step):
             pygame.draw.line(surface, (13, 20, 30), (0, y), (SCREEN_WIDTH, y), max(1, scaled(1)))
 
-        title_rect = pygame.Rect(scaled(40), scaled(34), SCREEN_WIDTH - scaled(80), max(58, scaled(74)))
-        draw_fitted_text(surface, "How to play", title_rect, GOLD, max_size=font_size_large, min_size=24, align="center")
-        subtitle_rect = pygame.Rect(scaled(60), title_rect.bottom, SCREEN_WIDTH - scaled(120), max(34, scaled(44)))
-        draw_fitted_text(surface, "Read the board, build light, upgrade cannons, and destroy every hive.", subtitle_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=13, align="center")
+        title_rect = pygame.Rect(scaled(40), scaled(30), SCREEN_WIDTH - scaled(80), max(70, scaled(88)))
+        draw_fitted_text(surface, "How to play", title_rect, GOLD, max_size=font_size_large + scaled(10), min_size=32, align="center")
+        subtitle_rect = pygame.Rect(scaled(60), title_rect.bottom, SCREEN_WIDTH - scaled(120), max(42, scaled(52)))
+        draw_fitted_text(surface, "Build light, upgrade cannons, destroy every hive.", subtitle_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(6), min_size=18, align="center")
 
         cards = [
-            ("Goal", "Protect the Generator.\nDestroy all hives\nbefore enemies break through.", UI_GOOD),
-            ("Light", "Enemies are easiest\nto control inside light.\nReveal roads with towers.", GENERATOR_BLUE),
-            ("Build", "Click a build button.\nThen click a lit empty cell on the map.", GOLD),
-            ("Cannons", "Select a cannon to upgrade.\nChoose Sniper, Howitzer, or Gatling.", UI_WARN),
-            ("Camera", "Hold RMB and drag to move the map.\nUse the mouse wheel to zoom.", CYAN),
-            ("Waves", "Space starts the next wave early.\nPause the game to open Menu.", UI_BAD),
+            ("Goal", "Keep Generator alive.\nDestroy every hive.", UI_GOOD),
+            ("Light", "Build light towers.\nEnemies fight inside light.", GENERATOR_BLUE),
+            ("Build", "Pick a tower.\nClick a lit empty cell.", GOLD),
+            ("Cannons", "Upgrade cannons.\nPick Sniper, Howitzer,\nor Gatling.", UI_WARN),
+            ("Camera", "Hold RMB to move.\nWheel to zoom.", CYAN),
+            ("Waves", "Space starts wave.\nPause opens Menu.", UI_BAD),
         ]
 
         buttons = self.get_tutorial_buttons()
@@ -2546,7 +2627,19 @@ class Game:
         card_w = (grid_w - gap * 2) // 3
         top = subtitle_rect.bottom + scaled(32)
         bottom_limit = buttons["play"].y - scaled(30)
-        card_h = max(92, (bottom_limit - top - gap) // 2)
+        title_h = max(42, scaled(50))
+        body_font_size = font_size_small + scaled(3)
+        body_font = ui_font(body_font_size)
+        body_w = card_w - scaled(32)
+        line_gap = max(2, body_font_size // 7)
+        needed_heights = []
+        for _, body, _ in cards:
+            wrapped = wrap_text_lines(body, body_font, body_w)
+            body_h = len(wrapped) * body_font.get_height() + line_gap * max(0, len(wrapped) - 1)
+            needed_heights.append(scaled(12) + title_h + scaled(6) + body_h + scaled(16))
+        desired_card_h = max(max(needed_heights), max(128, scaled(150)))
+        available_card_h = max(92, (bottom_limit - top - gap) // 2)
+        card_h = min(desired_card_h, available_card_h)
         total_h = card_h * 2 + gap
         start_x = (SCREEN_WIDTH - grid_w) // 2
         start_y = top + max(0, (bottom_limit - top - total_h) // 2)
@@ -2561,22 +2654,22 @@ class Game:
 
     def get_game_over_layout(self):
         card_w = min(max(620, scaled(860)), SCREEN_WIDTH - scaled(80))
-        card_h = max(420, scaled(520))
+        card_h = max(450, scaled(560))
         card_rect = pygame.Rect(0, 0, card_w, card_h)
         card_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
 
-        gap = max(14, scaled(18))
-        button_w = min(max(150, scaled(190)), (card_w - gap * 3) // 2)
-        button_h = max(54, scaled(68))
+        gap = max(16, scaled(22))
+        button_w = min(max(180, scaled(230)), (card_w - gap * 3) // 2)
+        button_h = max(66, scaled(80))
         button_y = card_rect.bottom - scaled(34) - button_h
         menu_rect = pygame.Rect(card_rect.centerx - button_w - gap // 2, button_y, button_w, button_h)
         again_rect = pygame.Rect(card_rect.centerx + gap // 2, button_y, button_w, button_h)
 
         summary_rect = pygame.Rect(
             card_rect.x + scaled(28),
-            card_rect.y + max(155, scaled(180)),
+            card_rect.y + max(165, scaled(190)),
             card_rect.w - scaled(56),
-            button_y - (card_rect.y + max(155, scaled(180))) - scaled(18),
+            button_y - (card_rect.y + max(165, scaled(190))) - scaled(18),
         )
         return card_rect, menu_rect, again_rect, summary_rect
 
@@ -2605,9 +2698,9 @@ class Game:
     def draw_match_summary_panel(self, surface, summary_rect):
         pad = max(12, scaled(18))
         gap = max(8, scaled(10))
-        title_h = max(26, scaled(32))
+        title_h = max(36, scaled(44))
         title_rect = pygame.Rect(summary_rect.x, summary_rect.y, summary_rect.w, title_h)
-        draw_fitted_text(surface, "Run Summary", title_rect, WHITE, max_size=font_size_small, min_size=14, align="center")
+        draw_fitted_text(surface, "Run Summary", title_rect, WHITE, max_size=font_size_small + scaled(6), min_size=18, align="center")
 
         stats = self.get_match_summary_items()
         stats_x = summary_rect.x
@@ -2620,8 +2713,8 @@ class Game:
             draw_card(surface, rect, (30, 38, 51), (62, 78, 96), radius=scaled(5))
             label_rect = pygame.Rect(rect.x + scaled(8), rect.y + scaled(4), rect.w - scaled(16), rect.h // 2)
             value_rect = pygame.Rect(rect.x + scaled(8), rect.y + rect.h // 2 - scaled(2), rect.w - scaled(16), rect.h // 2)
-            draw_fitted_text(surface, label, label_rect, UI_TEXT_DIM, max_size=font_size_small - 4, min_size=10, align="center")
-            draw_fitted_text(surface, value, value_rect, WHITE, max_size=font_size_small, min_size=12, align="center")
+            draw_fitted_text(surface, label, label_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(1), min_size=12, align="center")
+            draw_fitted_text(surface, value, value_rect, WHITE, max_size=font_size_small + scaled(6), min_size=16, align="center")
 
     def draw_game_over_overlay(self, surface):
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -2636,9 +2729,9 @@ class Game:
 
         draw_card(surface, card_rect, fill, accent, radius=scaled(8))
         title_rect = pygame.Rect(card_rect.x + scaled(24), card_rect.y + scaled(32), card_rect.w - scaled(48), max(72, scaled(96)))
-        draw_fitted_text(surface, title, title_rect, accent, max_size=font_size_large, min_size=26, align="center")
+        draw_fitted_text(surface, title, title_rect, accent, max_size=font_size_large + scaled(10), min_size=32, align="center")
         detail_rect = pygame.Rect(card_rect.x + scaled(32), title_rect.bottom, card_rect.w - scaled(64), max(42, scaled(58)))
-        draw_fitted_text(surface, detail, detail_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
+        draw_fitted_text(surface, detail, detail_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(6), min_size=18, align="center")
 
         self.draw_match_summary_panel(surface, summary_rect)
         self.draw_menu_action_button(surface, menu_rect, "Menu", (44, 56, 76), CYAN)
@@ -2646,13 +2739,13 @@ class Game:
 
     def get_exit_confirm_layout(self):
         card_w = min(max(350, scaled(520)), SCREEN_WIDTH - scaled(80))
-        card_h = max(220, scaled(260))
+        card_h = max(250, scaled(300))
         card_rect = pygame.Rect(0, 0, card_w, card_h)
         card_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
 
-        gap = max(14, scaled(18))
-        button_w = min(max(130, scaled(175)), (card_w - gap * 3) // 2)
-        button_h = max(52, scaled(64))
+        gap = max(16, scaled(22))
+        button_w = min(max(150, scaled(200)), (card_w - gap * 3) // 2)
+        button_h = max(64, scaled(76))
         button_y = card_rect.bottom - scaled(30) - button_h
         yes_rect = pygame.Rect(card_rect.centerx - button_w - gap // 2, button_y, button_w, button_h)
         no_rect = pygame.Rect(card_rect.centerx + gap // 2, button_y, button_w, button_h)
@@ -2677,9 +2770,9 @@ class Game:
         card_rect, yes_rect, no_rect = self.get_exit_confirm_layout()
         draw_card(surface, card_rect, (24, 30, 42), UI_WARN, radius=scaled(8))
         title_rect = pygame.Rect(card_rect.x + scaled(24), card_rect.y + scaled(28), card_rect.w - scaled(48), max(58, scaled(74)))
-        draw_fitted_text(surface, "Exit to menu?", title_rect, UI_WARN, max_size=font_size_medium, min_size=18, align="center")
+        draw_fitted_text(surface, "Exit to menu?", title_rect, UI_WARN, max_size=font_size_medium + scaled(10), min_size=24, align="center")
         detail_rect = pygame.Rect(card_rect.x + scaled(32), title_rect.bottom, card_rect.w - scaled(64), max(42, scaled(56)))
-        draw_fitted_text(surface, "Current run will be lost.", detail_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
+        draw_fitted_text(surface, "Current run will be lost.", detail_rect, UI_TEXT_DIM, max_size=font_size_small + scaled(5), min_size=18, align="center")
 
         self.draw_menu_action_button(surface, yes_rect, "Yes", (130, 48, 54), UI_BAD)
         self.draw_menu_action_button(surface, no_rect, "No", (48, 84, 66), UI_GOOD)
