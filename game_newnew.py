@@ -13,6 +13,8 @@ screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREE
 pygame.display.set_caption("The Eternity Covenant")
 clock = pygame.time.Clock()
 
+GAME_TITLE = "The Eternity Covenant"
+
 SCALE = SCREEN_HEIGHT / 1500
 
 font_size_small = max(30, int(50 * SCALE))
@@ -100,7 +102,7 @@ EDGE_SCROLL_SIZE = max(16, int(22 * SCALE))
 CAMERA_DRAG_THRESHOLD = max(6, int(10 * SCALE))
 
 TOWER_COST = {
-    "lamp": 150,
+    "lamp": 200,
     "beacon": 100
 }
 TOWER_UPGRADE_COST = {
@@ -110,7 +112,7 @@ TOWER_UPGRADE_COST = {
 }
 
 STARTING_MONEY = 210
-GENERATOR_INCOME_BY_LEVEL = {1: 5, 2: 10, 3: 20, 4: 40}
+GENERATOR_INCOME_BY_LEVEL = {1: 5, 2: 9, 3: 18, 4: 36}
 GENERATOR_TOWER_LIMIT_BY_LEVEL = {1: 6, 2: 10, 3: 13, 4: 16}
 GENERATOR_UPGRADE_COST = {1: 300, 2: 600, 3: 1200}
 ARTILLERY_COST = 400
@@ -716,19 +718,27 @@ class Tower:
             self.color = (120, 230, 140)
             self.damage = int(58 * level_bonus)
             self.range = CELL_SIZE * (16 + max(0, self.level - 2) * 2)
-            self.cooldown_max = max(4, int((16 - max(0, self.level - 2) * 2) / 2))
+            current_cooldown = (16 - max(0, self.level - 2) * 2) / 2
+            self.cooldown_max = max(4, int(round(current_cooldown / 0.75)))
             self.splash_radius = 0
             self.splash_damage_multiplier = 0
         self.cooldown = min(self.cooldown, self.cooldown_max)
+
+    def can_attack_target(self, enemy, game):
+        if not enemy.alive:
+            return False
+        if math.hypot(enemy.pos[0] - self.x, enemy.pos[1] - self.y) > self.range:
+            return False
+        if self.tower_type == "cannon":
+            return game is not None and game.is_target_lit(enemy)
+        return True
 
     def find_target(self, enemies, game=None):
         if self.damage <= 0:
             return None
         in_range = [
             enemy for enemy in enemies
-            if enemy.alive
-            and math.hypot(enemy.pos[0] - self.x, enemy.pos[1] - self.y) <= self.range
-            and (self.tower_type != "cannon" or game is None or game.is_target_lit(enemy))
+            if self.can_attack_target(enemy, game)
         ]
         if not in_range:
             return None
@@ -769,16 +779,18 @@ class Tower:
         if self.cooldown == 0:
             target = self.find_target(enemies, game)
             if target:
-                self.fire_laser(target, enemies)
+                self.fire_laser(target, enemies, game)
                 self.cooldown = self.cooldown_max
 
-    def fire_laser(self, target, enemies):
+    def fire_laser(self, target, enemies, game):
         tx, ty = target.pos
         target.take_damage(self.damage, self.damage_type, self.tower_type)
         splash_damage = int(self.damage * self.splash_damage_multiplier)
         if self.splash_radius > 0 and splash_damage > 0:
             for enemy in enemies:
                 if enemy is not target and enemy.alive:
+                    if self.tower_type == "cannon" and (game is None or not game.is_target_lit(enemy)):
+                        continue
                     if math.hypot(enemy.pos[0] - tx, enemy.pos[1] - ty) <= self.splash_radius:
                         enemy.take_damage(splash_damage, self.damage_type, self.tower_type)
         self.laser_beams.append([self.x, self.y, tx, ty, 8])
@@ -941,7 +953,8 @@ class Headquarters:
         pygame.draw.rect(surface, YELLOW, (int(HQ_CENTER_X - bar_width / 2), bar_y, int(green_width), scaled(10)))
 
 class Game:
-    def __init__(self):
+    def __init__(self, show_start=True):
+        self.screen_state = "start" if show_start else "playing"
         self.money = STARTING_MONEY
         self.wave = 1
         self.wave_active = False
@@ -994,7 +1007,8 @@ class Game:
         self.camera_drag_button = None
         self.clamp_camera()
         self.update_lighting()
-        self.start_wave(early=False)
+        if self.screen_state == "playing":
+            self.start_wave(early=False)
 
     def clamp_camera(self):
         visible_w = VIEWPORT_WIDTH / self.zoom
@@ -1107,8 +1121,11 @@ class Game:
         self.notification_text = text
         self.notification_timer = duration
 
+    def is_start_screen(self):
+        return self.screen_state == "start"
+
     def toggle_pause(self):
-        if self.defeat or self.victory:
+        if self.screen_state != "playing" or self.defeat or self.victory:
             return False
         self.paused = not self.paused
         self.notify("Paused" if self.paused else "Resumed")
@@ -1704,8 +1721,6 @@ class Game:
         sizes = self.panel_sizes()
         pause_y = (
             sizes["pad"]
-            + sizes["title_h"]
-            + sizes["gap"]
             + 4 * (sizes["metric_h"] + sizes["gap"])
             + sizes["gap"]
         )
@@ -1714,6 +1729,21 @@ class Game:
             "enabled": not self.defeat and not self.victory,
             "selected": self.paused,
             "rect": pygame.Rect(sizes["pad"], pause_y, SIDE_PANEL_WIDTH - sizes["pad"] * 2, sizes["button_h"]),
+        }
+
+    def get_menu_button(self):
+        sizes = self.panel_sizes()
+        pause_button = self.get_pause_button()
+        return {
+            "title": "Menu",
+            "enabled": True,
+            "selected": False,
+            "rect": pygame.Rect(
+                sizes["pad"],
+                pause_button["rect"].bottom + sizes["gap"],
+                SIDE_PANEL_WIDTH - sizes["pad"] * 2,
+                sizes["button_h"],
+            ),
         }
 
     def get_right_panel_buttons(self):
@@ -1843,6 +1873,10 @@ class Game:
             if pause_button["enabled"]:
                 self.toggle_pause()
             return True
+
+        menu_button = self.get_menu_button()
+        if menu_button["rect"].collidepoint(pos):
+            return "menu"
 
         for button in self.get_left_build_buttons():
             if button["rect"].collidepoint(pos):
@@ -1989,10 +2023,7 @@ class Game:
         pygame.draw.rect(surface, UI_PANEL, panel_rect)
         pygame.draw.line(surface, UI_STROKE, (SIDE_PANEL_WIDTH - 1, 0), (SIDE_PANEL_WIDTH - 1, SCREEN_HEIGHT), max(1, scaled(2)))
 
-        title_rect = pygame.Rect(pad, pad, SIDE_PANEL_WIDTH - pad * 2, sizes["title_h"])
-        draw_fitted_text(surface, "The Eternity Covenant", title_rect, WHITE, max_size=font_size_medium, min_size=16)
-
-        y = title_rect.bottom + gap
+        y = pad
         card_w = SIDE_PANEL_WIDTH - pad * 2
         card_h = sizes["metric_h"]
         total_hives = len(self.hives)
@@ -2016,6 +2047,16 @@ class Game:
             None,
             pause_button["enabled"],
             pause_button["selected"],
+        )
+
+        menu_button = self.get_menu_button()
+        self.draw_panel_button(
+            surface,
+            menu_button["rect"],
+            menu_button["title"],
+            None,
+            menu_button["enabled"],
+            menu_button["selected"],
         )
 
         build_buttons = self.get_left_build_buttons()
@@ -2164,6 +2205,82 @@ class Game:
         draw_fitted_text(surface, "Paused", title_rect, WHITE, max_size=font_size_large, min_size=24, align="center")
         state_rect = pygame.Rect(rect.x + scaled(18), rect.y + rect.h // 2, rect.w - scaled(36), rect.h // 3)
         draw_fitted_text(surface, f"Wave {self.wave} - {len(self.enemies)} enemies alive", state_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=12, align="center")
+
+    def draw_menu_action_button(self, surface, rect, title, fill=(48, 84, 66), stroke=UI_GOOD):
+        draw_card(surface, rect, fill, stroke, radius=scaled(8))
+        label_rect = rect.inflate(-scaled(18), -scaled(10))
+        draw_fitted_text(surface, title, label_rect, WHITE, max_size=font_size_medium, min_size=16, align="center")
+
+    def get_start_button_rect(self):
+        button_w = min(max(260, scaled(340)), SCREEN_WIDTH - scaled(80))
+        button_h = max(58, scaled(72))
+        rect = pygame.Rect(0, 0, button_w, button_h)
+        rect.center = (SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.62))
+        return rect
+
+    def handle_start_click(self, pos):
+        if self.get_start_button_rect().collidepoint(pos):
+            return "play"
+        return None
+
+    def draw_start_screen(self, surface):
+        surface.fill((8, 12, 18))
+        grid_color = (18, 27, 38)
+        step = max(42, scaled(64))
+        for x in range(0, SCREEN_WIDTH + step, step):
+            pygame.draw.line(surface, grid_color, (x, 0), (x - scaled(160), SCREEN_HEIGHT), max(1, scaled(2)))
+        for y in range(0, SCREEN_HEIGHT + step, step):
+            pygame.draw.line(surface, (14, 22, 32), (0, y), (SCREEN_WIDTH, y), max(1, scaled(1)))
+
+        title_rect = pygame.Rect(scaled(40), int(SCREEN_HEIGHT * 0.25), SCREEN_WIDTH - scaled(80), max(86, scaled(126)))
+        draw_fitted_text(surface, GAME_TITLE, title_rect, GOLD, max_size=max(font_size_large, scaled(118)), min_size=28, align="center")
+
+        button_rect = self.get_start_button_rect()
+        self.draw_menu_action_button(surface, button_rect, "Play", (48, 84, 66), UI_GOOD)
+
+    def get_game_over_layout(self):
+        card_w = min(max(360, scaled(560)), SCREEN_WIDTH - scaled(80))
+        card_h = max(260, scaled(320))
+        card_rect = pygame.Rect(0, 0, card_w, card_h)
+        card_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+
+        gap = max(14, scaled(18))
+        button_w = min(max(150, scaled(205)), (card_w - gap * 3) // 2)
+        button_h = max(54, scaled(68))
+        button_y = card_rect.bottom - scaled(34) - button_h
+        play_rect = pygame.Rect(card_rect.centerx - button_w - gap // 2, button_y, button_w, button_h)
+        menu_rect = pygame.Rect(card_rect.centerx + gap // 2, button_y, button_w, button_h)
+        return card_rect, play_rect, menu_rect
+
+    def handle_game_over_click(self, pos):
+        if not (self.victory or self.defeat):
+            return None
+        _, play_rect, menu_rect = self.get_game_over_layout()
+        if play_rect.collidepoint(pos):
+            return "play_again"
+        if menu_rect.collidepoint(pos):
+            return "menu"
+        return None
+
+    def draw_game_over_overlay(self, surface):
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        surface.blit(overlay, (0, 0))
+
+        card_rect, play_rect, menu_rect = self.get_game_over_layout()
+        accent = GOLD if self.victory else UI_BAD
+        fill = (24, 30, 42) if self.victory else (42, 24, 30)
+        title = "VICTORY!" if self.victory else "DEFEAT"
+        detail = "All hives destroyed." if self.victory else "Generator destroyed."
+
+        draw_card(surface, card_rect, fill, accent, radius=scaled(8))
+        title_rect = pygame.Rect(card_rect.x + scaled(24), card_rect.y + scaled(32), card_rect.w - scaled(48), max(72, scaled(96)))
+        draw_fitted_text(surface, title, title_rect, accent, max_size=font_size_large, min_size=26, align="center")
+        detail_rect = pygame.Rect(card_rect.x + scaled(32), title_rect.bottom, card_rect.w - scaled(64), max(42, scaled(58)))
+        draw_fitted_text(surface, detail, detail_rect, UI_TEXT_DIM, max_size=font_size_small, min_size=14, align="center")
+
+        self.draw_menu_action_button(surface, play_rect, "Play Again", (48, 84, 66), UI_GOOD)
+        self.draw_menu_action_button(surface, menu_rect, "Menu", (44, 56, 76), CYAN)
 
     def draw_notification(self, surface):
         if self.notification_timer <= 0 or not self.notification_text:
@@ -2319,6 +2436,9 @@ class Game:
         pygame.draw.rect(surface, BLACK, (VIEWPORT_X, VIEWPORT_Y, VIEWPORT_WIDTH, VIEWPORT_HEIGHT), max(1, scaled(2)))
 
     def update(self):
+        if self.screen_state != "playing":
+            return
+
         if self.defeat or self.victory:
             return
 
@@ -2423,21 +2543,13 @@ class Game:
                 draw_card(surface, rect, color, BLACK, radius=scaled(6))
                 draw_fitted_text(surface, name, rect.inflate(-scaled(12), -scaled(8)), BLACK, max_size=font_size_small, min_size=12, align="center")
 
-        if self.victory:
-            rect = pygame.Rect(0, 0, min(VIEWPORT_WIDTH - scaled(80), scaled(560)), max(100, scaled(130)))
-            rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
-            draw_card(surface, rect, (24, 30, 42), GOLD, radius=scaled(8))
-            draw_fitted_text(surface, "VICTORY! All hives destroyed.", rect.inflate(-scaled(24), -scaled(18)), GOLD, max_size=font_size_large, min_size=20, align="center")
-        elif self.defeat:
-            rect = pygame.Rect(0, 0, min(VIEWPORT_WIDTH - scaled(80), scaled(420)), max(90, scaled(120)))
-            rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
-            draw_card(surface, rect, (42, 24, 30), UI_BAD, radius=scaled(8))
-            draw_fitted_text(surface, "DEFEAT", rect.inflate(-scaled(24), -scaled(18)), UI_BAD, max_size=font_size_large, min_size=24, align="center")
+        if self.victory or self.defeat:
+            self.draw_game_over_overlay(surface)
 
         self.draw_notification(surface)
 
 
-game = Game()
+game = Game(show_start=True)
 world_surface = pygame.Surface((FIELD_WIDTH, FIELD_HEIGHT))
 running = True
 
@@ -2448,6 +2560,18 @@ while running:
         if event.type == pygame.QUIT:
             running = False
         if event.type == pygame.KEYDOWN:
+            if game.is_start_screen():
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    game = Game(show_start=False)
+                elif event.key == pygame.K_ESCAPE:
+                    running = False
+                continue
+            if game.victory or game.defeat:
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    game = Game(show_start=False)
+                elif event.key == pygame.K_ESCAPE:
+                    game = Game(show_start=True)
+                continue
             if event.key == pygame.K_ESCAPE:
                 if game.tower_specialization_pending:
                     game.cancel_tower_specialization()
@@ -2455,6 +2579,16 @@ while running:
                     running = False
             if event.key == pygame.K_p:
                 game.toggle_pause()
+
+        if game.is_start_screen() or game.victory or game.defeat:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                pos = pygame.mouse.get_pos()
+                action = game.handle_start_click(pos) if game.is_start_screen() else game.handle_game_over_click(pos)
+                if action in ("play", "play_again"):
+                    game = Game(show_start=False)
+                elif action == "menu":
+                    game = Game(show_start=True)
+            continue
 
         if event.type == pygame.MOUSEWHEEL:
             pos = pygame.mouse.get_pos()
@@ -2524,7 +2658,9 @@ while running:
             if pos[0] >= SCREEN_WIDTH - SIDE_PANEL_WIDTH:
                 game.handle_right_panel_click(pos)
             elif pos[0] < SIDE_PANEL_WIDTH:
-                game.handle_left_panel_click(pos)
+                action = game.handle_left_panel_click(pos)
+                if action == "menu":
+                    game = Game(show_start=True)
             elif game.is_in_viewport(pos):
                 game.begin_camera_drag(pos, event.button)
 
@@ -2542,13 +2678,16 @@ while running:
                 if can_start:
                     game.start_wave(early=True)
 
-    if not game.tower_specialization_pending:
-        game.update_camera()
-    game.update()
+    if game.is_start_screen():
+        game.draw_start_screen(screen)
+    else:
+        if not game.tower_specialization_pending and not game.victory and not game.defeat:
+            game.update_camera()
+        game.update()
 
-    game.draw_world(world_surface)
-    game.blit_world(screen, world_surface)
-    game.draw_ui(screen)
+        game.draw_world(world_surface)
+        game.blit_world(screen, world_surface)
+        game.draw_ui(screen)
 
     pygame.display.flip()
     clock.tick(60)
