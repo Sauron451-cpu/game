@@ -3,6 +3,7 @@ import math
 import random
 import sys
 import heapq
+import os
 
 pygame.init()
 
@@ -58,11 +59,11 @@ MAP_ROWS = [
     ".....#.....#.........~~~~~~=~~~~~~.....................",
     ".....###...#######...~~CC~~=~~CC~~.....................",
     ".......#.........#..~~~CC~~=~~CC~~~.........$..........",
-    ".......#.........#..~~~~~=====~~~~~....................",
-    ".......#.........#..~~~~~=GGG=~~~~~....................",
-    ".......#.........#..~=====GGG=~~~~~....................",
-    ".......#.......#####==~~~=GGG=~~~~~.###############....",
-    ".......#.......#....~~~~~=====~~~~~.#.............#....",
+    ".......#.........#..~~~~~GGGGG~~~~~....................",
+    ".......#.........#..~~~~~GGGGG~~~~~....................",
+    ".......#.........#..~====GGGGG~~~~~....................",
+    ".......#.......#####==~~~GGGGG~~~~~.###############....",
+    ".......#.......#....~~~~~GGGGG~~~~~.#.............#....",
     ".......#.......#....~~~CC~~=~~CC~~~.#.............#....",
     ".......#.......#.....~~CC~~=~~CC~~..###...........#....",
     ".......#.......#####.~~~~~~=~~~~~~....#...........#....",
@@ -96,6 +97,21 @@ FIELD_OFFSET_Y = 0
 FIELD_WIDTH = CELL_SIZE * GRID_WIDTH
 FIELD_HEIGHT = CELL_SIZE * GRID_HEIGHT
 FULL_MAP_ATTACK_RANGE = math.hypot(FIELD_WIDTH, FIELD_HEIGHT) + CELL_SIZE
+ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+GRASS_TEXTURE_PATH = os.path.join(ASSET_DIR, "grass_texture.png")
+CASTLE_TEXTURE_PATH = os.path.join(ASSET_DIR, "castle_texture.png")
+CANNON_TEXTURE_PATHS = {
+    "base": os.path.join(ASSET_DIR, "cannon_base.png"),
+    "sniper": os.path.join(ASSET_DIR, "cannon_sniper.png"),
+    "scatter": os.path.join(ASSET_DIR, "cannon_scatter.png"),
+    "gatling": os.path.join(ASSET_DIR, "cannon_gatling.png"),
+}
+CANNON_TEXTURE_BASE_ANGLES = {
+    "base": 0,
+    "gatling": 0,
+    "sniper": 180,
+    "scatter": 90,
+}
 MIN_ZOOM = max(VIEWPORT_WIDTH / FIELD_WIDTH, VIEWPORT_HEIGHT / FIELD_HEIGHT)
 MAX_ZOOM = 1.9
 START_ZOOM = min(MAX_ZOOM, max(MIN_ZOOM, 0.85))
@@ -126,9 +142,11 @@ TOWER_DISPLAY_NAMES = {
     "beacon": "Observer",
     "cannon": "Cannon",
 }
-CANNON_DAMAGE_MULTIPLIER = 0.9
+CANNON_DAMAGE_MULTIPLIER = 0.99
 CANNON_LEVEL_DAMAGE_BONUS = 0.05
 CANNON_SPECIALIZATION_SOURCES = {"sniper", "scatter", "gatling"}
+CANNON_TURN_SPEED_DEGREES = 16
+CANNON_FIRE_ARC_DEGREES = 4
 LIGHT_SIZE_BY_LEVEL = {1: 5, 2: 7, 3: 9, 4: 11}
 LAMP_LIGHT_WIDTH = 3
 ACTION_COOLDOWN_FRAMES = {
@@ -297,9 +315,9 @@ def make_route_pair(start, goals):
 PATH_CELLS = map_cells_with_symbols(MAP_ROAD_SYMBOLS)
 START_LIGHT_CELLS = map_cells_with_symbols(MAP_LIGHT_SYMBOLS)
 HQ_CELLS = map_cells_with_symbols({"G"})
-require_square_component(frozenset(HQ_CELLS), 3, "Generator")
+require_square_component(frozenset(HQ_CELLS), 5, "Generator")
 HQ_MIN_X, HQ_MIN_Y, _, _ = component_bounds(HQ_CELLS)
-HQ_SIZE_CELLS = 3
+HQ_SIZE_CELLS = 5
 HQ_CENTER_X = FIELD_OFFSET_X + (HQ_MIN_X + HQ_SIZE_CELLS / 2) * CELL_SIZE
 HQ_CENTER_Y = FIELD_OFFSET_Y + (HQ_MIN_Y + HQ_SIZE_CELLS / 2) * CELL_SIZE
 GENERATOR_CELLS = set(HQ_CELLS)
@@ -315,7 +333,7 @@ CANNON_CELLS = {
     for cell in footprint
 }
 
-BASE_CASTLE_LIGHT_MARGIN = 0
+BASE_CASTLE_LIGHT_MARGIN = 2
 CASTLE_LIGHT_ZONE = set(START_LIGHT_CELLS) | set(HQ_CELLS) | set(CANNON_CELLS)
 
 SECRET_CELLS = tuple(sorted(map_cells_with_symbols({"$"}), key=lambda cell: (cell[1], cell[0])))
@@ -533,6 +551,19 @@ def mix_color(color, target, amount):
 def ui_pulse(speed=0.006):
     return 0.5 + 0.5 * math.sin(pygame.time.get_ticks() * speed)
 
+def normalize_angle(angle):
+    return angle % 360
+
+def angle_delta(current, target):
+    return (target - current + 180) % 360 - 180
+
+def rotate_angle_towards(current, target, max_step):
+    delta = angle_delta(current, target)
+    if abs(delta) <= max_step:
+        return normalize_angle(target), True
+    step = max_step if delta > 0 else -max_step
+    return normalize_angle(current + step), False
+
 def draw_progress_bar(surface, rect, fraction, fill=UI_GOOD, back=(14, 17, 23), stroke=BLACK):
     fraction = max(0, min(1, fraction))
     pygame.draw.rect(surface, back, rect, border_radius=scaled(3))
@@ -548,6 +579,78 @@ def draw_square_dot(surface, color, center, size, border_color=None, border_widt
     pygame.draw.rect(surface, color, rect)
     if border_color and border_width > 0:
         pygame.draw.rect(surface, border_color, rect, border_width)
+
+def load_texture(path):
+    try:
+        image = pygame.image.load(path).convert_alpha()
+    except (FileNotFoundError, pygame.error):
+        return None
+    bounds = image.get_bounding_rect(min_alpha=1)
+    if bounds.w > 0 and bounds.h > 0:
+        image = image.subsurface(bounds).copy()
+    return image
+
+def load_scaled_texture(path, size):
+    image = load_texture(path)
+    if image is None:
+        return None
+    return pygame.transform.smoothscale(image, (size, size))
+
+TEXTURE_FIT_CACHE = {}
+TEXTURE_ROTATE_CACHE = {}
+TEXTURE_RENDER_CACHE = {}
+GRASS_TEXTURE = load_scaled_texture(GRASS_TEXTURE_PATH, CELL_SIZE)
+CASTLE_TEXTURE = load_scaled_texture(CASTLE_TEXTURE_PATH, HQ_SIZE_CELLS * CELL_SIZE)
+CANNON_TEXTURES = {
+    key: load_texture(path)
+    for key, path in CANNON_TEXTURE_PATHS.items()
+}
+
+def fit_texture_to_rect(image, rect, fill=1.0):
+    if image is None:
+        return None
+    max_w = max(1, int(rect.w * fill))
+    max_h = max(1, int(rect.h * fill))
+    key = (id(image), max_w, max_h)
+    if key in TEXTURE_FIT_CACHE:
+        return TEXTURE_FIT_CACHE[key]
+    source_w, source_h = image.get_size()
+    scale = min(max_w / source_w, max_h / source_h)
+    target_size = (max(1, int(source_w * scale)), max(1, int(source_h * scale)))
+    fitted = pygame.transform.smoothscale(image, target_size)
+    TEXTURE_FIT_CACHE[key] = fitted
+    return fitted
+
+def rotated_texture(image, angle):
+    if image is None:
+        return None
+    quantized = int(round(angle / 5) * 5) % 360
+    key = (id(image), quantized)
+    if key not in TEXTURE_ROTATE_CACHE:
+        TEXTURE_ROTATE_CACHE[key] = pygame.transform.rotate(image, quantized)
+    return TEXTURE_ROTATE_CACHE[key]
+
+def render_texture_for_rect(image, rect, angle=0, fill=1.0, keep_scale=False):
+    if image is None:
+        return None
+    max_w = max(1, int(rect.w * fill))
+    max_h = max(1, int(rect.h * fill))
+    quantized = int(round(angle / 5) * 5) % 360
+    key = (id(image), max_w, max_h, quantized, keep_scale)
+    if key in TEXTURE_RENDER_CACHE:
+        return TEXTURE_RENDER_CACHE[key]
+    source_w, source_h = image.get_size()
+    scale = min(max_w / source_w, max_h / source_h)
+    if keep_scale:
+        rendered = pygame.transform.rotozoom(image, quantized, scale)
+    else:
+        rotated = pygame.transform.rotozoom(image, quantized, 1.0)
+        source_w, source_h = rotated.get_size()
+        scale = min(max_w / source_w, max_h / source_h)
+        target_size = (max(1, int(source_w * scale)), max(1, int(source_h * scale)))
+        rendered = pygame.transform.smoothscale(rotated, target_size)
+    TEXTURE_RENDER_CACHE[key] = rendered
+    return rendered
 
 def cells_world_rect(cells):
     min_x = min(cell[0] for cell in cells)
@@ -765,6 +868,7 @@ class Tower:
         self.total_investment = 0 if fixed else TOWER_COST.get(tower_type, 0)
         self.specialization = None
         self.direction_index = 1
+        self.aim_angle = 0
         self.broken = False
         self.disabled_timer = 0
         self.is_powered = False
@@ -866,6 +970,17 @@ class Tower:
         path_priority = self.path_target_priority(target)
         return (path_priority[0], shots_to_kill, path_priority[1])
 
+    def target_angle(self, target):
+        return math.degrees(math.atan2(target.pos[1] - self.y, target.pos[0] - self.x))
+
+    def turn_towards_target(self, target):
+        desired_angle = self.target_angle(target)
+        if abs(angle_delta(self.aim_angle, desired_angle)) <= CANNON_FIRE_ARC_DEGREES:
+            self.aim_angle = normalize_angle(desired_angle)
+            return True
+        self.aim_angle, _ = rotate_angle_towards(self.aim_angle, desired_angle, CANNON_TURN_SPEED_DEGREES)
+        return False
+
     def update(self, enemies, game):
         for effect in self.shot_effects[:]:
             effect["timer"] -= 1
@@ -879,14 +994,19 @@ class Tower:
             return
         if self.cooldown > 0:
             self.cooldown -= 1
-        if self.cooldown == 0:
-            target = self.find_target(enemies, game)
-            if target:
-                self.fire_laser(target, enemies, game)
-                self.cooldown = self.cooldown_max
+        target = self.find_target(enemies, game)
+        if not target:
+            return
+        aimed = True
+        if self.tower_type == "cannon":
+            aimed = self.turn_towards_target(target)
+        if self.cooldown == 0 and aimed:
+            self.fire_laser(target, enemies, game)
+            self.cooldown = self.cooldown_max
 
     def fire_laser(self, target, enemies, game):
         tx, ty = target.pos
+        self.aim_angle = normalize_angle(self.target_angle(target))
         damage_source = self.damage_source()
         target.take_damage(self.damage, self.damage_type, damage_source)
         splash_damage = int(self.damage * self.splash_damage_multiplier)
@@ -947,6 +1067,22 @@ class Tower:
             "color": shot_color,
         })
 
+    def cannon_texture_key(self):
+        if self.tower_type != "cannon":
+            return None
+        return self.specialization or "base"
+
+    def draw_cannon_asset(self, surface, rect):
+        texture_key = self.cannon_texture_key()
+        texture = CANNON_TEXTURES.get(texture_key)
+        if texture is None:
+            return False
+        base_angle = CANNON_TEXTURE_BASE_ANGLES.get(texture_key, 0)
+        rotated = render_texture_for_rect(texture, rect, base_angle - self.aim_angle, 1.12, keep_scale=True)
+        image_rect = rotated.get_rect(center=rect.center)
+        surface.blit(rotated, image_rect)
+        return True
+
     def draw(self, surface):
         if self.hp <= 0:
             return
@@ -976,10 +1112,12 @@ class Tower:
                 pygame.draw.circle(surface, (255, 255, 180), (int(end[0]), int(end[1])), scaled(8))
         elif self.tower_type == "cannon":
             cannon_color = GRAY if self.broken else self.color
-            rect = self.world_rect().inflate(-scaled(6), -scaled(6))
-            pygame.draw.rect(surface, cannon_color, rect)
-            pygame.draw.rect(surface, BLACK, rect, max(1, scaled(2)))
-            draw_square_dot(surface, RED, (self.x, self.y), scaled(20), WHITE, max(1, scaled(1)))
+            rect = self.world_rect().inflate(scaled(18), scaled(18))
+            drew_asset = self.draw_cannon_asset(surface, rect)
+            if not drew_asset:
+                fallback_rect = self.world_rect().inflate(-scaled(3), -scaled(3))
+                pygame.draw.rect(surface, cannon_color, fallback_rect)
+                draw_square_dot(surface, RED, (self.x, self.y), scaled(20), WHITE, max(1, scaled(1)))
             if self.broken:
                 pygame.draw.line(surface, RED, rect.topleft, rect.bottomright, max(2, scaled(3)))
                 pygame.draw.line(surface, RED, rect.topright, rect.bottomleft, max(2, scaled(3)))
@@ -1115,13 +1253,13 @@ class Headquarters:
             HQ_SIZE_CELLS * CELL_SIZE,
             HQ_SIZE_CELLS * CELL_SIZE
         )
-        pygame.draw.rect(surface, GENERATOR_RED, rect)
-        pygame.draw.rect(surface, BLACK, rect, scaled(4))
-        pygame.draw.rect(surface, WHITE, rect, scaled(2))
-        center = (int(HQ_CENTER_X), int(HQ_CENTER_Y))
-        inner = rect.inflate(-scaled(18), -scaled(18))
-        pygame.draw.rect(surface, (255, 96, 48), inner)
-        draw_square_dot(surface, GENERATOR_RED, center, scaled(28), BLACK, max(1, scaled(2)))
+        if CASTLE_TEXTURE:
+            surface.blit(CASTLE_TEXTURE, rect)
+        else:
+            pygame.draw.rect(surface, GENERATOR_RED, rect)
+            inner = rect.inflate(-scaled(18), -scaled(18))
+            pygame.draw.rect(surface, (255, 96, 48), inner)
+            draw_square_dot(surface, GENERATOR_RED, (int(HQ_CENTER_X), int(HQ_CENTER_Y)), scaled(28), BLACK, max(1, scaled(2)))
         bar_width = scaled(80)
         bar_y = rect.top - scaled(20)
         pygame.draw.rect(surface, RED, (int(HQ_CENTER_X - bar_width / 2), bar_y, bar_width, scaled(10)))
@@ -2388,7 +2526,7 @@ class Game:
 
     def get_specialization_layout(self):
         menu_w = min(max(640, scaled(760)), SCREEN_WIDTH - scaled(80))
-        menu_h = max(300, scaled(360))
+        menu_h = max(380, scaled(440))
         menu_rect = pygame.Rect(0, 0, menu_w, menu_h)
         menu_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
 
@@ -2440,7 +2578,14 @@ class Game:
                 pygame.draw.rect(surface, stroke, outer, max(2, scaled(3)), border_radius=scaled(12))
             draw_card(surface, rect, fill, stroke, radius=scaled(10))
 
-            name_rect = pygame.Rect(rect.x + scaled(12), rect.y + scaled(16), rect.w - scaled(24), max(42, scaled(50)))
+            preview_rect = pygame.Rect(rect.x + scaled(16), rect.y + scaled(12), rect.w - scaled(32), max(78, scaled(92)))
+            preview_texture = CANNON_TEXTURES.get(spec)
+            if preview_texture:
+                preview_angle = CANNON_TEXTURE_BASE_ANGLES.get(spec, 0)
+                preview_image = render_texture_for_rect(preview_texture, preview_rect, preview_angle, 1.0)
+                surface.blit(preview_image, preview_image.get_rect(center=preview_rect.center))
+
+            name_rect = pygame.Rect(rect.x + scaled(12), preview_rect.bottom + scaled(4), rect.w - scaled(24), max(42, scaled(50)))
             draw_fitted_text(surface, name, name_rect, WHITE, max_size=font_size_small + scaled(8), min_size=20, align="center")
 
             desc_rect = pygame.Rect(rect.x + scaled(14), name_rect.bottom + scaled(8), rect.w - scaled(28), rect.bottom - name_rect.bottom - scaled(20))
@@ -2887,7 +3032,10 @@ class Game:
                     inner = rect.inflate(-max(2, scaled(4)), -max(2, scaled(4)))
                     pygame.draw.rect(surface, (160, 90, 45), inner)
                 else:
-                    pygame.draw.rect(surface, GREEN, rect)
+                    if GRASS_TEXTURE:
+                        surface.blit(GRASS_TEXTURE, rect)
+                    else:
+                        pygame.draw.rect(surface, GREEN, rect)
 
         for bonus in self.bonuses:
             bonus.draw(surface)
